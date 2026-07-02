@@ -3512,13 +3512,12 @@ async def paypal_check(call):
         await call.answer(await t(uid, "paypal_not_paid"), show_alert=True)
         return
 
-    await _finalize_paypal_order(order_id, uid, username, order)
+    await _finalize_paypal_order(order_id, uid, order)
 
 
-async def _finalize_paypal_order(order_id: int, uid: int, username: str, order):
+async def _finalize_paypal_order(order_id: int, uid: int, order):
     """
     Финализация PayPal заказа: обновить статус → уведомить пользователя и админов.
-    Вызывается как из кнопки 'Я оплатил', так и из webhook.
     Идемпотентна: повторный вызов безопасен благодаря UPDATE WHERE status='paypal_pending'.
     """
     async with pool.acquire() as conn:
@@ -3529,8 +3528,13 @@ async def _finalize_paypal_order(order_id: int, uid: int, username: str, order):
         """, order_id)
 
     if not updated:
-        # Уже обработан (например, одновременно webhook и кнопка)
         return
+
+    # Берём реальный username пользователя из БД
+    async with pool.acquire() as conn:
+        username = await conn.fetchval(
+            "SELECT username FROM users WHERE user_id=$1", uid
+        ) or "нет username"
 
     # Уведомление пользователю
     try:
@@ -3540,12 +3544,7 @@ async def _finalize_paypal_order(order_id: int, uid: int, username: str, order):
 
     # Собираем текст для админов
     async with pool.acquire() as conn:
-        items_str = order["items"] if hasattr(order, "__getitem__") else order
-        if isinstance(order, dict):
-            items_str = order["items"]
-        else:
-            items_str = order["items"]
-
+        items_str = order["items"]
         text_admin = "ЗАКАЗ (оплачен через PayPal ✅):\n"
         for part in items_str.split(","):
             pid, qty = part.split(":")
@@ -3566,7 +3565,7 @@ async def _finalize_paypal_order(order_id: int, uid: int, username: str, order):
 
     kb = InlineKeyboardMarkup()
     kb.add(
-        InlineKeyboardButton("✅ Выдано", callback_data=f"admin_confirm_{order_id}"),
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
         InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
     )
 
@@ -3584,6 +3583,8 @@ async def _finalize_paypal_order(order_id: int, uid: int, username: str, order):
                 "UPDATE orders SET admin_message_ids=$1 WHERE id=$2",
                 ",".join(msg_ids), order_id
             )
+
+@dp.callback_query_handler(lambda c: c.data.startswith("admin_confirm_"))
 async def admin_confirm(call):
     order_id = int(call.data.split("_")[2])
     admin_username = call.from_user.username or "admin"
@@ -3976,8 +3977,7 @@ async def paypal_webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Re
                 captured = await paypal_capture_order(order["paypal_order_id"])
                 if captured:
                     uid = order["user_id"]
-                    username = "PayPal"
-                    await _finalize_paypal_order(bot_order_id, uid, username, order)
+                    await _finalize_paypal_order(bot_order_id, uid, order)
 
         return aiohttp.web.Response(
             text="<html><body><h2>✅ Оплата получена. Вернитесь в Telegram.</h2></body></html>",
@@ -4007,8 +4007,7 @@ async def paypal_webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Re
                 captured = await paypal_capture_order(paypal_order_id)
                 if captured:
                     uid = order["user_id"]
-                    username = "PayPal"
-                    await _finalize_paypal_order(order["id"], uid, username, order)
+                    await _finalize_paypal_order(order["id"], uid, order)
 
     return aiohttp.web.Response(text="ok")
 
