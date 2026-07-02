@@ -20,9 +20,9 @@ WALLET = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
 
 # ── PayPal Sandbox ──────────────────────────────────────────────────────────
 PAYPAL_CLIENT_ID     = os.getenv("PAYPAL_CLIENT_ID",
-    "ATbpfz0wXAE88Qc8NECogmmveKz-GJUUSmRGtI3gC7JqCq53wsdufvaQ-1vroQT4j8EkLAd9f3Ccjw44")
+    "Ad7cYKnQJPf3iCtlUKn6ACAgLBctxq96x4Qt-sXvHAZkHCcrmEEB9WIj6HOy4MaHCcaWFb2yON6pLLKO")
 PAYPAL_SECRET        = os.getenv("PAYPAL_SECRET",
-    "ELL-5oQG2c_L3Dx6_lCS3aMl_6xc196p-MFBByiZVAhZ2Ug7JfeV96lpwXrPJjTRO4ZO2SdI6iYMPLng")
+    "EONipH-lUypcV8ppqZKTr5tnb4xC0svmnuPTAfqGWZais1StpfMIw3vTxKnm4y8vq2jGO64reh5mksNs")
 PAYPAL_BASE          = "https://api-m.sandbox.paypal.com"
 PAYPAL_WEBHOOK_PORT  = int(os.getenv("PORT", "8080"))
 PAYPAL_WEBHOOK_PATH  = "/paypal/webhook"
@@ -1166,6 +1166,19 @@ async def calculate_total_discount(uid, quantity):
     return round(total_discount, 2)
 
 async def calculate_final_price(uid, quantity):
+    # Проверяем тестовый override (только для админов через /testprice)
+    try:
+        async with pool.acquire() as conn:
+            override = await conn.fetchval(
+                "SELECT override_price FROM cart_price_override WHERE user_id=$1", uid
+            )
+    except Exception:
+        override = None
+
+    if override is not None:
+        # Тестовый режим: фиксированная цена за штуку, скидки не применяем
+        return round(override * quantity, 2), 0.0
+
     base_total = 15 * quantity
     discount = await calculate_total_discount(uid, quantity)
 
@@ -3755,7 +3768,47 @@ async def admin_cancel(call):
 # ========== АДМИН-КОМАНДЫ ==========
 
 
-@dp.message_handler(commands=["freezestreak"])
+@dp.message_handler(commands=["testprice"])
+async def testprice(message: types.Message):
+    """
+    /testprice — установить цену всех товаров в корзине в 1€ для теста PayPal.
+    /testprice reset — вернуть реальные цены (перезагрузить из products).
+    Только для администраторов.
+    """
+    if not is_admin(message.from_user.id):
+        return
+
+    uid = message.from_user.id
+    args = message.get_args().strip().lower()
+
+    if args == "reset":
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM cart_price_override WHERE user_id=$1", uid
+            )
+        await message.answer("✅ Тестовая цена сброшена. В корзине снова реальные цены.")
+        return
+
+    # Создаём таблицу если нет (одноразово)
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS cart_price_override (
+                user_id BIGINT PRIMARY KEY,
+                override_price REAL
+            )
+        """)
+        await conn.execute("""
+            INSERT INTO cart_price_override (user_id, override_price)
+            VALUES ($1, 1.0)
+            ON CONFLICT (user_id) DO UPDATE SET override_price = 1.0
+        """, uid)
+
+    await message.answer(
+        "✅ Тестовая цена активна.\n\n"
+        "Все товары в корзине будут считаться по 1€ за штуку.\n"
+        "Оформи заказ через PayPal и проверь.\n\n"
+        "Для сброса: /testprice reset"
+    )
 async def freezestreak(message: types.Message):
     if not is_admin(message.from_user.id):
         return
