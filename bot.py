@@ -18,7 +18,7 @@ API_TOKEN = "7686799347:AAFBQFwQAwtm02bsxEReUQPutUcMO58yHxs"
 ADMIN_IDS = [7805603791, 8283121468, 5317145892] 
 WALLET = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
 def is_admin(uid):
-    return uid in ADMIN_IDS
+    return uid in ADMIN_IDS 
 
 logging.basicConfig(level=logging.INFO)
 
