@@ -17,6 +17,17 @@ from aiogram.utils import executor
 API_TOKEN = "7686799347:AAFBQFwQAwtm02bsxEReUQPutUcMO58yHxs"
 ADMIN_IDS = [7805603791, 8283121468, 5317145892] 
 WALLET = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
+
+# ── PayPal Sandbox ──────────────────────────────────────────────────────────
+PAYPAL_CLIENT_ID     = os.getenv("PAYPAL_CLIENT_ID",
+    "ATbpfz0wXAE88Qc8NECogmmveKz-GJUUSmRGtI3gC7JqCq53wsdufvaQ-1vroQT4j8EkLAd9f3Ccjw44")
+PAYPAL_SECRET        = os.getenv("PAYPAL_SECRET",
+    "ELL-5oQG2c_L3Dx6_lCS3aMl_6xc196p-MFBByiZVAhZ2Ug7JfeV96lpwXrPJjTRO4ZO2SdI6iYMPLng")
+PAYPAL_BASE          = "https://api-m.sandbox.paypal.com"
+PAYPAL_WEBHOOK_PORT  = int(os.getenv("PORT", "8080"))
+PAYPAL_WEBHOOK_PATH  = "/paypal/webhook"
+# Публичный URL Railway-деплоя (задать в переменных окружения)
+PUBLIC_URL           = os.getenv("PUBLIC_URL", "https://shoptgtest-production.up.railway.app/paypal/webhook")  # напр. https://xxx.up.railway.app
 def is_admin(uid):
     return uid in ADMIN_IDS 
 
@@ -214,6 +225,12 @@ async def init_db():
             ADD COLUMN IF NOT EXISTS order_total_usdt REAL,
             ADD COLUMN IF NOT EXISTS payment_created_at TIMESTAMP,
             ADD COLUMN IF NOT EXISTS payment_expires_at TIMESTAMP
+        """)
+
+        # PayPal order ID для сверки при подтверждении оплаты
+        await conn.execute("""
+            ALTER TABLE orders
+            ADD COLUMN IF NOT EXISTS paypal_order_id TEXT
         """)
 
         # Глобальная заморозка Buy Streak: каждая строка — один период
@@ -500,6 +517,13 @@ TEXTS = {
         "pay": "💳 Оплата",
         "cash": "💵 Наличные",
         "usdt": "💳 USDT",
+        "paypal": "🅿️ PayPal",
+        "paypal_pay_btn": "💳 Оплатить через PayPal",
+        "paypal_waiting": "⏳ Ожидаем оплату через PayPal...\n\nПосле оплаты нажмите кнопку ниже.",
+        "paypal_paid_btn": "✅ Я оплатил",
+        "paypal_success": "✅ Оплата успешно получена.\n\nВаш заказ передан в обработку.\n\nАдминистратор скоро свяжется с вами.",
+        "paypal_error": "❌ Не удалось создать платёж PayPal. Попробуйте другой способ оплаты.",
+        "paypal_not_paid": "❌ Оплата ещё не подтверждена PayPal. Попробуйте через несколько секунд.",
         "cancel": "❌ Отмена",
         "order_done": "Заказ оформлен. Админ скоро свяжется",
         "confirm_order": "Подтвердить заказ?",
@@ -640,6 +664,13 @@ TEXTS = {
         "pay": "💳 Оплата",
         "cash": "💵 Готівка",
         "usdt": "💳 USDT",
+        "paypal": "🅿️ PayPal",
+        "paypal_pay_btn": "💳 Сплатити через PayPal",
+        "paypal_waiting": "⏳ Очікуємо оплату через PayPal...\n\nПісля оплати натисни кнопку нижче.",
+        "paypal_paid_btn": "✅ Я оплатив",
+        "paypal_success": "✅ Оплата успішно отримана.\n\nВаше замовлення передано в обробку.\n\nАдміністратор незабаром зв'яжеться з вами.",
+        "paypal_error": "❌ Не вдалося створити платіж PayPal. Спробуй інший спосіб оплати.",
+        "paypal_not_paid": "❌ Оплату ще не підтверджено PayPal. Спробуй через кілька секунд.",
         "cancel": "❌ Скасувати",
         "order_done": "Замовлення оформлене. Адмін скоро зв'яжеться",
         "confirm_order": "Підтвердити замовлення?",
@@ -780,6 +811,13 @@ TEXTS = {
         "pay": "💳 Zahlung",
         "cash": "💵 Bar",
         "usdt": "💳 USDT",
+        "paypal": "🅿️ PayPal",
+        "paypal_pay_btn": "💳 Per PayPal bezahlen",
+        "paypal_waiting": "⏳ Warte auf PayPal-Zahlung...\n\nNach der Zahlung bitte unten klicken.",
+        "paypal_paid_btn": "✅ Ich habe gezahlt",
+        "paypal_success": "✅ Zahlung erfolgreich erhalten.\n\nIhre Bestellung wird bearbeitet.\n\nDer Admin meldet sich bald.",
+        "paypal_error": "❌ PayPal-Zahlung konnte nicht erstellt werden. Bitte andere Zahlungsart wählen.",
+        "paypal_not_paid": "❌ Zahlung noch nicht von PayPal bestätigt. Bitte in einigen Sekunden erneut versuchen.",
         "cancel": "❌ Abbrechen",
         "order_done": "Bestellung erstellt. Admin meldet sich",
         "confirm_order": "Bestellung bestätigen?",
@@ -1266,7 +1304,123 @@ async def clear_usdt_lock(uid):
             WHERE user_id=$1
         """, uid)
 
-# ========== BUY STREAK (утилиты) ==========
+# ========== PAYPAL ==========
+
+_paypal_token_cache: dict = {"token": None, "expires_at": 0}
+
+
+async def paypal_get_access_token() -> str | None:
+    """Получить Access Token PayPal (кэшируется до истечения срока)."""
+    import time
+    now = time.time()
+    if _paypal_token_cache["token"] and now < _paypal_token_cache["expires_at"] - 30:
+        return _paypal_token_cache["token"]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{PAYPAL_BASE}/v1/oauth2/token",
+                data={"grant_type": "client_credentials"},
+                auth=aiohttp.BasicAuth(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
+                headers={"Accept": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            data = await resp.json()
+
+        if "access_token" not in data:
+            logging.error(f"PayPal token error: {data}")
+            return None
+
+        _paypal_token_cache["token"] = data["access_token"]
+        _paypal_token_cache["expires_at"] = now + data.get("expires_in", 3600)
+        return _paypal_token_cache["token"]
+    except Exception as e:
+        logging.error(f"PayPal token exception: {e}")
+        return None
+
+
+async def paypal_create_order(amount_eur: float, order_id: int) -> dict | None:
+    """
+    Создать PayPal Order.
+    Возвращает {"paypal_order_id": ..., "approve_url": ...} или None при ошибке.
+    """
+    token = await paypal_get_access_token()
+    if not token:
+        return None
+
+    return_url = f"{PUBLIC_URL}{PAYPAL_WEBHOOK_PATH}/return?bot_order_id={order_id}"
+    cancel_url = f"{PUBLIC_URL}{PAYPAL_WEBHOOK_PATH}/cancel?bot_order_id={order_id}"
+
+    payload = {
+        "intent": "CAPTURE",
+        "purchase_units": [{
+            "reference_id": str(order_id),
+            "amount": {
+                "currency_code": "EUR",
+                "value": f"{amount_eur:.2f}",
+            },
+            "description": f"Order #{order_id}",
+        }],
+        "application_context": {
+            "return_url": return_url,
+            "cancel_url": cancel_url,
+            "brand_name": "BIZZ Shop",
+            "user_action": "PAY_NOW",
+        },
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{PAYPAL_BASE}/v2/checkout/orders",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
+            data = await resp.json()
+
+        if data.get("status") != "CREATED":
+            logging.error(f"PayPal create order error: {data}")
+            return None
+
+        approve_url = next(
+            (l["href"] for l in data.get("links", []) if l["rel"] == "approve"),
+            None,
+        )
+        return {"paypal_order_id": data["id"], "approve_url": approve_url}
+    except Exception as e:
+        logging.error(f"PayPal create order exception: {e}")
+        return None
+
+
+async def paypal_capture_order(paypal_order_id: str) -> bool:
+    """
+    Capture (списать деньги) по PayPal Order.
+    Возвращает True если платёж успешно захвачен (status == COMPLETED).
+    """
+    token = await paypal_get_access_token()
+    if not token:
+        return False
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{PAYPAL_BASE}/v2/checkout/orders/{paypal_order_id}/capture",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
+            data = await resp.json()
+
+        return data.get("status") == "COMPLETED"
+    except Exception as e:
+        logging.error(f"PayPal capture exception: {e}")
+        return False
 
 async def is_streak_frozen() -> bool:
     """Активна ли сейчас глобальная заморозка Buy Streak."""
@@ -3018,9 +3172,14 @@ async def pay(call):
     kb.add(
         InlineKeyboardButton(await t(uid,"cash"), callback_data="cash"),
         InlineKeyboardButton(await t(uid,"usdt"), callback_data="usdt"),
+    )
+    kb.add(
+        InlineKeyboardButton(await t(uid,"paypal"), callback_data="paypal"),
+    )
+    kb.add(
         InlineKeyboardButton(await t(uid,"cancel"), callback_data="open_cart")
     )
-    
+
     await render(call, await t(uid,"pay"), kb)
 
 @dp.callback_query_handler(lambda c: c.data == "cash")
@@ -3240,7 +3399,191 @@ async def paid(call):
                 UPDATE orders SET admin_message_ids=$1 WHERE id=$2
             """, ",".join(msg_ids), order_id)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("admin_confirm_"))
+# ========== PAYPAL ОПЛАТА ==========
+
+@dp.callback_query_handler(lambda c: c.data == "paypal")
+async def paypal_pay(call):
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+
+    async with pool.acquire() as conn:
+        cart_items = await conn.fetch("""
+            SELECT product_id, quantity FROM cart WHERE user_id=$1
+        """, uid)
+
+    if not cart_items:
+        await render(call, await t(uid, "empty_cart"))
+        return
+
+    total_qty = sum(r["quantity"] for r in cart_items)
+    eur_total, discount = await calculate_final_price(uid, total_qty)
+    username = call.from_user.username or "нет username"
+
+    async with pool.acquire() as conn:
+        text_admin = "ЗАКАЗ:\n"
+        items_str_parts = []
+        for r in cart_items:
+            product = await conn.fetchrow(
+                "SELECT name_ru FROM products WHERE id=$1", r["product_id"]
+            )
+            text_admin += f"{product['name_ru']} x{r['quantity']}\n"
+            items_str_parts.append(f"{r['product_id']}:{r['quantity']}")
+
+        items_str = ",".join(items_str_parts)
+
+        # Создаём заказ в БД со статусом 'paypal_pending'
+        order_id = await conn.fetchval("""
+            INSERT INTO orders (user_id, items, total, payment, discount, status)
+            VALUES ($1, $2, $3, 'paypal', $4, 'paypal_pending')
+            RETURNING id
+        """, uid, items_str, eur_total, discount)
+
+        await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
+
+    # Создаём PayPal Order
+    result = await paypal_create_order(eur_total, order_id)
+
+    if not result:
+        # Откатываем заказ если PayPal недоступен
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE orders SET status='cancelled' WHERE id=$1", order_id
+            )
+        await render(call, await t(uid, "paypal_error"))
+        return
+
+    paypal_order_id = result["paypal_order_id"]
+    approve_url = result["approve_url"]
+
+    # Сохраняем paypal_order_id
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE orders SET paypal_order_id=$1 WHERE id=$2",
+            paypal_order_id, order_id
+        )
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(
+        await t(uid, "paypal_pay_btn"), url=approve_url
+    ))
+    kb.add(InlineKeyboardButton(
+        await t(uid, "paypal_paid_btn"),
+        callback_data=f"paypal_check_{order_id}"
+    ))
+
+    await render(call, await t(uid, "paypal_waiting"), kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("paypal_check_"))
+async def paypal_check(call):
+    """Пользователь нажал 'Я оплатил' — проверяем и capture'им PayPal Order."""
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+    order_id = int(call.data.split("_")[2])
+    username = call.from_user.username or "нет username"
+
+    async with pool.acquire() as conn:
+        order = await conn.fetchrow("""
+            SELECT status, paypal_order_id, total, discount, items
+            FROM orders WHERE id=$1 AND user_id=$2
+        """, order_id, uid)
+
+    if not order:
+        await call.answer("Заказ не найден", show_alert=True)
+        return
+
+    if order["status"] == "pending":
+        # Уже подтверждён через webhook — показываем сообщение об успехе
+        await render(call, await t(uid, "paypal_success"))
+        return
+
+    if order["status"] != "paypal_pending":
+        await render(call, await t(uid, "paypal_success"))
+        return
+
+    # Пытаемся capture (списать деньги у PayPal)
+    captured = await paypal_capture_order(order["paypal_order_id"])
+
+    if not captured:
+        await call.answer(await t(uid, "paypal_not_paid"), show_alert=True)
+        return
+
+    await _finalize_paypal_order(order_id, uid, username, order)
+
+
+async def _finalize_paypal_order(order_id: int, uid: int, username: str, order):
+    """
+    Финализация PayPal заказа: обновить статус → уведомить пользователя и админов.
+    Вызывается как из кнопки 'Я оплатил', так и из webhook.
+    Идемпотентна: повторный вызов безопасен благодаря UPDATE WHERE status='paypal_pending'.
+    """
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval("""
+            UPDATE orders SET status='pending'
+            WHERE id=$1 AND status='paypal_pending'
+            RETURNING id
+        """, order_id)
+
+    if not updated:
+        # Уже обработан (например, одновременно webhook и кнопка)
+        return
+
+    # Уведомление пользователю
+    try:
+        await bot.send_message(uid, await t(uid, "paypal_success"))
+    except Exception:
+        pass
+
+    # Собираем текст для админов
+    async with pool.acquire() as conn:
+        items_str = order["items"] if hasattr(order, "__getitem__") else order
+        if isinstance(order, dict):
+            items_str = order["items"]
+        else:
+            items_str = order["items"]
+
+        text_admin = "ЗАКАЗ (оплачен через PayPal ✅):\n"
+        for part in items_str.split(","):
+            pid, qty = part.split(":")
+            product = await conn.fetchrow(
+                "SELECT name_ru FROM products WHERE id=$1", int(pid)
+            )
+            if product:
+                text_admin += f"{product['name_ru']} x{qty}\n"
+
+    total = order["total"]
+    order_text = (
+        f"{text_admin}\n"
+        f"ID: {order_id}\n"
+        f"User: @{username}\n"
+        f"Оплата: PayPal ✅ (уже оплачено)\n"
+        f"ИТОГО: {total}€"
+    )
+
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Выдано", callback_data=f"admin_confirm_{order_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
+    )
+
+    msg_ids = []
+    for admin in ADMIN_IDS:
+        try:
+            sent = await bot.send_message(admin, order_text, reply_markup=kb)
+            msg_ids.append(f"{admin}:{sent.message_id}")
+        except Exception:
+            pass
+
+    if msg_ids:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE orders SET admin_message_ids=$1 WHERE id=$2",
+                ",".join(msg_ids), order_id
+            )
 async def admin_confirm(call):
     order_id = int(call.data.split("_")[2])
     admin_username = call.from_user.username or "admin"
@@ -3611,8 +3954,90 @@ async def unstock_cmd(message: types.Message):
 
 # ========== ЗАПУСК ==========
 
+async def paypal_webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """
+    PayPal шлёт IPN/Webhook на этот endpoint при изменении статуса платежа.
+    Также принимает return_url редирект после оплаты (пользователь возвращается
+    с PayPal). Обрабатываем оба сценария в одном хендлере.
+    """
+    # Return URL: пользователь вернулся после оплаты
+    if request.method == "GET":
+        bot_order_id = int(request.rel_url.query.get("bot_order_id", 0))
+        token = request.rel_url.query.get("token", "")  # PayPal Order ID
+
+        if bot_order_id and token:
+            async with pool.acquire() as conn:
+                order = await conn.fetchrow("""
+                    SELECT id, user_id, status, paypal_order_id, total, discount, items
+                    FROM orders WHERE id=$1
+                """, bot_order_id)
+
+            if order and order["status"] == "paypal_pending":
+                captured = await paypal_capture_order(order["paypal_order_id"])
+                if captured:
+                    uid = order["user_id"]
+                    username = "PayPal"
+                    await _finalize_paypal_order(bot_order_id, uid, username, order)
+
+        return aiohttp.web.Response(
+            text="<html><body><h2>✅ Оплата получена. Вернитесь в Telegram.</h2></body></html>",
+            content_type="text/html"
+        )
+
+    # Webhook от PayPal (POST)
+    try:
+        data = await request.json()
+    except Exception:
+        return aiohttp.web.Response(status=400)
+
+    event_type = data.get("event_type", "")
+
+    if event_type == "CHECKOUT.ORDER.APPROVED":
+        resource = data.get("resource", {})
+        paypal_order_id = resource.get("id")
+
+        if paypal_order_id:
+            async with pool.acquire() as conn:
+                order = await conn.fetchrow("""
+                    SELECT id, user_id, status, paypal_order_id, total, discount, items
+                    FROM orders WHERE paypal_order_id=$1
+                """, paypal_order_id)
+
+            if order and order["status"] == "paypal_pending":
+                captured = await paypal_capture_order(paypal_order_id)
+                if captured:
+                    uid = order["user_id"]
+                    username = "PayPal"
+                    await _finalize_paypal_order(order["id"], uid, username, order)
+
+    return aiohttp.web.Response(text="ok")
+
+
 async def on_startup(dp):
     await init_db()
 
+
+async def run():
+    await on_startup(dp)
+
+    # aiohttp-сервер для PayPal webhook и return URL
+    app = aiohttp.web.Application()
+    app.router.add_get(f"{PAYPAL_WEBHOOK_PATH}/return", paypal_webhook_handler)
+    app.router.add_get(f"{PAYPAL_WEBHOOK_PATH}/cancel", lambda r: aiohttp.web.Response(
+        text="<html><body><h2>Оплата отменена. Вернитесь в Telegram.</h2></body></html>",
+        content_type="text/html"
+    ))
+    app.router.add_post(PAYPAL_WEBHOOK_PATH, paypal_webhook_handler)
+
+    runner = aiohttp.web.AppRunner(app)
+    await runner.setup()
+    site = aiohttp.web.TCPSite(runner, "0.0.0.0", PAYPAL_WEBHOOK_PORT)
+    await site.start()
+    logging.info(f"PayPal webhook listening on :{PAYPAL_WEBHOOK_PORT}{PAYPAL_WEBHOOK_PATH}")
+
+    # Запускаем polling рядом с aiohttp
+    await dp.start_polling(reset_webhook=True)
+
+
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    asyncio.run(run())
