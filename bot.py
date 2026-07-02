@@ -14,7 +14,7 @@ from aiogram.utils import executor
 
 # ========== КОНФИГ ==========
 
-API_TOKEN = "8754147382:AAH2So1At0ZMX6nkJ3N-ssH6s_tDBXgDvfI"
+API_TOKEN = "7686799347:AAFBQFwQAwtm02bsxEReUQPutUcMO58yHxs"
 ADMIN_IDS = [7805603791, 8283121468, 5317145892] 
 WALLET = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
 def is_admin(uid):
