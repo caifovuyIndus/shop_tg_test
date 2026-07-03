@@ -22,7 +22,7 @@ WALLET = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
 PAYPAL_CLIENT_ID     = os.getenv("PAYPAL_CLIENT_ID",
     "Ad7cYKnQJPf3iCtlUKn6ACAgLBctxq96x4Qt-sXvHAZkHCcrmEEB9WIj6HOy4MaHCcaWFb2yON6pLLKO")
 PAYPAL_SECRET        = os.getenv("PAYPAL_SECRET",
-    "EONipH-lUypcV8ppqZKTr5tnb4xC0svmnuPTAfqGWZais1StpfMIw3vTxKnm4y8vq2j0G64reh5mksNs")
+    "EONipH-lUypcV8ppqZKTr5tnb4xC0svmnuPTAfqGWZais1StpfMIw3vTxKnm4y8vq2jGO64reh5mksNs")
 PAYPAL_BASE          = "https://api-m.paypal.com"
 PAYPAL_WEBHOOK_PORT  = int(os.getenv("PORT", "8080"))
 PAYPAL_WEBHOOK_PATH  = "/paypal/webhook"
