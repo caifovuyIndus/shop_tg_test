@@ -22,8 +22,8 @@ WALLET = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
 PAYPAL_CLIENT_ID     = os.getenv("PAYPAL_CLIENT_ID",
     "Ad7cYKnQJPf3iCtlUKn6ACAgLBctxq96x4Qt-sXvHAZkHCcrmEEB9WIj6HOy4MaHCcaWFb2yON6pLLKO")
 PAYPAL_SECRET        = os.getenv("PAYPAL_SECRET",
-    "EONipH-lUypcV8ppqZKTr5tnb4xC0svmnuPTAfqGWZais1StpfMIw3vTxKnm4y8vq2jGO64reh5mksNs")
-PAYPAL_BASE          = "https://api-m.sandbox.paypal.com"
+    "EONipH-lUypcV8ppqZKTr5tnb4xC0svmnuPTAfqGWZais1StpfMIw3vTxKnm4y8vq2j0G64reh5mksNs")
+PAYPAL_BASE          = "https://api-m.paypal.com"
 PAYPAL_WEBHOOK_PORT  = int(os.getenv("PORT", "8080"))
 PAYPAL_WEBHOOK_PATH  = "/paypal/webhook"
 # Публичный URL Railway-деплоя (задать в переменных окружения)
@@ -3770,16 +3770,20 @@ async def admin_cancel(call):
 
 @dp.message_handler(commands=["testprice"])
 async def testprice(message: types.Message):
-    """
-    /testprice — установить цену всех товаров в корзине в 1€ для теста PayPal.
-    /testprice reset — вернуть реальные цены (перезагрузить из products).
-    Только для администраторов.
-    """
     if not is_admin(message.from_user.id):
         return
 
     uid = message.from_user.id
     args = message.get_args().strip().lower()
+
+    # Гарантируем существование таблицы при любом вызове команды
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS cart_price_override (
+                user_id BIGINT PRIMARY KEY,
+                override_price REAL
+            )
+        """)
 
     if args == "reset":
         async with pool.acquire() as conn:
@@ -3789,14 +3793,7 @@ async def testprice(message: types.Message):
         await message.answer("✅ Тестовая цена сброшена. В корзине снова реальные цены.")
         return
 
-    # Создаём таблицу если нет (одноразово)
     async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS cart_price_override (
-                user_id BIGINT PRIMARY KEY,
-                override_price REAL
-            )
-        """)
         await conn.execute("""
             INSERT INTO cart_price_override (user_id, override_price)
             VALUES ($1, 1.0)
