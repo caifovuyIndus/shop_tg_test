@@ -27,7 +27,7 @@ PAYPAL_BASE          = "https://api-m.paypal.com"
 PAYPAL_WEBHOOK_PORT  = int(os.getenv("PORT", "8080"))
 PAYPAL_WEBHOOK_PATH  = "/paypal/webhook"
 # Публичный URL Railway-деплоя (задать в переменных окружения)
-PUBLIC_URL           = os.getenv("PUBLIC_URL", "https://shoptgtest-production.up.railway.app/paypal/webhook")  # напр. https://xxx.up.railway.app
+PUBLIC_URL           = os.getenv("PUBLIC_URL", "https://shoptgtest-production.up.railway.app")  # напр. https://xxx.up.railway.app
 def is_admin(uid):
     return uid in ADMIN_IDS 
 
