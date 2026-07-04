@@ -2959,6 +2959,9 @@ async def gift_delivery_apply(call):
         """, ",".join(msg_ids), request_id)
 
     await render(call, await t(uid, "gift_done"))
+
+
+async def _sync_gift_admins(request_id: int, status_line: str):
     """Обновляет или пересылает сообщение всем админам по заявке на подарок."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
