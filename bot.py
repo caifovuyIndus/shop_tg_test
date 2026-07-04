@@ -252,8 +252,14 @@ async def init_db():
         """)
         # На старых деплоях колонка могла быть создана как INTEGER — приводим к BOOLEAN.
         await conn.execute("""
+            ALTER TABLE orders ALTER COLUMN is_delivery DROP DEFAULT
+        """)
+        await conn.execute("""
             ALTER TABLE orders
             ALTER COLUMN is_delivery TYPE BOOLEAN USING is_delivery::boolean
+        """)
+        await conn.execute("""
+            ALTER TABLE orders ALTER COLUMN is_delivery SET DEFAULT false
         """)
         await conn.execute("""
             ALTER TABLE orders
