@@ -17,7 +17,8 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 
 # ========== КОНФИГ ==========
 
-API_TOKEN = "8794586314:AAGF6m1wEt3WEeC-BEj57gcgwc5asWCFE5M"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=BOT_TOKEN)
 ADMIN_IDS = [7805603791, 8283121468, 5317145892] 
 CRYPTOBOT_TOKEN     = os.getenv("CRYPTOBOT_TOKEN", "604617:AAWqkQtz77IxSlpPJw6fzAHfGOlUeu88orQ")
 CRYPTOBOT_BASE      = "https://pay.crypt.bot/api"
