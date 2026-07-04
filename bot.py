@@ -3091,7 +3091,7 @@ async def render_category_shop(target, uid, category):
     else:
         text += f"💰 {base_price}€\n\n"
 
-    if delivery:
+    if delivery == True:
         text += await t(uid, "free_delivery_hint") + "\n\n"
     else:
         
