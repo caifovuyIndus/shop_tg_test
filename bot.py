@@ -3,7 +3,7 @@ import psycopg2
 import os
 import asyncio
 import asyncpg
-import random 
+import random
 import aiohttp
 from datetime import date, timedelta, datetime
 from urllib.parse import quote
@@ -17,7 +17,7 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 
 # ========== КОНФИГ ==========
 
-API_TOKEN = "8794586314:AAGF6m1wEt3WEeC-BEj57gcgwc5asWCFE5M"
+API_TOKEN = "7686799347:AAFBQFwQAwtm02bsxEReUQPutUcMO58yHxs"
 ADMIN_IDS = [7805603791, 8283121468, 5317145892] 
 CRYPTOBOT_TOKEN     = os.getenv("CRYPTOBOT_TOKEN", "604617:AAWqkQtz77IxSlpPJw6fzAHfGOlUeu88orQ")
 CRYPTOBOT_BASE      = "https://pay.crypt.bot/api"
@@ -3359,9 +3359,9 @@ async def render_cart(target, uid):
     if discount > 0:
         text += "\n" + (await t(uid,"savings")).format(value=discount)
 
-    # Подсказка про бесплатную доставку — только в режиме самовывоза
+    # Подсказка про бесплатную доставку — только в режиме доставки
     cart_mode = await get_cart_mode(uid)
-    if cart_mode != "delivery":
+    if cart_mode == "delivery":
         text += "\n\n" + await t(uid, "free_delivery_hint")
 
     kb.row(
@@ -3451,7 +3451,9 @@ async def noop(call):
 async def start_delivery_form(target, uid):
     """Запускает форму с шага 1 — запрос имени."""
     await DeliveryForm.name.set()
-    await bot.send_message(uid, await t(uid, "delivery_step_name"), reply_markup=ReplyKeyboardRemove())
+    sent = await bot.send_message(uid, await t(uid, "delivery_step_name"), reply_markup=ReplyKeyboardRemove())
+    # Сохраняем message_id чтобы удалить после ответа пользователя
+    await dp.storage.update_data(chat=uid, user=uid, data={"last_bot_msg": sent.message_id})
 
 
 async def show_delivery_confirm(target, uid, data: dict, from_pay: bool = False):
@@ -3465,30 +3467,32 @@ async def show_delivery_confirm(target, uid, data: dict, from_pay: bool = False)
         InlineKeyboardButton(await t(uid, "delivery_refill_btn"), callback_data="delivery_refill"),
     )
 
-    # Восстанавливаем главную клавиатуру
+    # Восстанавливаем главную клавиатуру отдельным сообщением,
+    # затем единственное сообщение с данными доставки + inline-кнопками
     lang = await get_lang(uid)
     mk = main_menu(lang)
-
-    if isinstance(target, types.CallbackQuery):
-        await bot.send_message(uid, text, reply_markup=mk)
-        await bot.send_message(uid, "👆", reply_markup=kb)
-    else:
-        await bot.send_message(uid, text, reply_markup=mk)
-        await bot.send_message(uid, "👆", reply_markup=kb)
+    await bot.send_message(uid, "✅", reply_markup=mk)
+    await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
 
 
 @dp.message_handler(state=DeliveryForm.name)
 async def delivery_got_name(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     name = message.text.strip()
-    await state.update_data(name=name)
-    await DeliveryForm.phone.set()
 
-    # Удаляем вопрос бота и ответ пользователя
+    # Удаляем вопрос бота (сообщение с запросом имени) и ответ пользователя
+    data = await state.get_data()
+    try:
+        await bot.delete_message(uid, data.get("last_bot_msg"))
+    except Exception:
+        pass
     try:
         await message.delete()
     except Exception:
         pass
+
+    await state.update_data(name=name)
+    await DeliveryForm.phone.set()
 
     kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     kb.add(types.KeyboardButton(await t(uid, "delivery_step_phone_btn"), request_contact=True))
