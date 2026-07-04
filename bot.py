@@ -700,7 +700,6 @@ TEXTS = {
         "delivery_profile_title": "📦 Адрес доставки",
         "delivery_test_pay": "🧪 Тестовая оплата (DEV)",
         "delivery_test_pay_done": "✅ Тестовый заказ оформлен. Заказ передан в обработку.",
-        "gift_delivery_free_hint": "🎁 Для бесплатной банки доставка полностью бесплатна.",
     },
 
     "ua": {
@@ -868,7 +867,6 @@ TEXTS = {
         "delivery_profile_title": "📦 Адреса доставки",
         "delivery_test_pay": "🧪 Тестова оплата (DEV)",
         "delivery_test_pay_done": "✅ Тестове замовлення оформлено. Замовлення передано в обробку.",
-        "gift_delivery_free_hint": "🎁 Для безкоштовної банки доставка повністю безкоштовна.",
     },
 
     "de": {
@@ -1037,7 +1035,6 @@ TEXTS = {
         "delivery_profile_title": "📦 Lieferadresse",
         "delivery_test_pay": "🧪 Testzahlung (DEV)",
         "delivery_test_pay_done": "✅ Testbestellung aufgegeben. Bestellung wird bearbeitet.",
-        "gift_delivery_free_hint": "🎁 Für die Gratis-Dose ist die Lieferung vollständig kostenlos.",
     }
 }
 
@@ -2562,7 +2559,24 @@ async def gift_apply(call):
     lang = await get_lang(uid)
     name = p[f"name_{lang}"]
 
-    # Создаём запись заявки (без request_id пока)
+    # Блок доставки для сообщения администраторам
+    gift_cart_mode = await get_cart_mode(uid)
+    delivery_block = ""
+    if gift_cart_mode == "delivery":
+        delivery_info = await get_delivery_info(uid)
+        if delivery_info:
+            tracking_mark = "✅" if delivery_info["with_tracking"] else "❌"
+            delivery_block = (
+                f"\n\n📦 ДОСТАВКА:\n"
+                f"Имя: {delivery_info['full_name']}\n"
+                f"Телефон: {delivery_info['phone']}\n"
+                f"Bundesland: {delivery_info['bundesland']}\n"
+                f"Stadt: {delivery_info['stadt']}\n"
+                f"Straße: {delivery_info['strasse']}\n"
+                f"Трек-номер: {tracking_mark}"
+            )
+
+    # Создаём запись заявки
     async with pool.acquire() as conn:
         request_id = await conn.fetchval("""
             INSERT INTO gift_requests (user_id, product_id, username)
@@ -2574,6 +2588,7 @@ async def gift_apply(call):
         f"🎁 Бесплатная банка\n\n"
         f"Пользователь: @{username}\n\n"
         f"Выбранный товар:\n{name_ru}"
+        f"{delivery_block}"
     )
 
     admin_kb = InlineKeyboardMarkup()
@@ -2835,10 +2850,7 @@ async def render_category_selection(target, uid, mode="shop"):
     toggle_btn_label = await t(uid, "pickup_mode_btn") if cart_mode == "delivery" else await t(uid, "delivery_mode_btn")
     toggle_callback = "set_mode_pickup" if cart_mode == "delivery" else "set_mode_delivery"
 
-    if cart_mode == "delivery":
-        hint = await t(uid, "gift_delivery_free_hint" if mode == "gift" else "delivery_free_hint")
-    else:
-        hint = ""
+    hint = await t(uid, "delivery_free_hint") if cart_mode == "delivery" else ""
     text = await t(uid, "choose_section")
     if hint:
         text += f"\n\n{hint}"
@@ -3219,80 +3231,58 @@ async def set_mode_pickup(call):
 
 # ========== FSM: ЗАПОЛНЕНИЕ ДАННЫХ ДОСТАВКИ ==========
 
-async def _try_delete(chat_id: int, message_id: int):
-    """Тихое удаление сообщения (игнорирует ошибки)."""
-    try:
-        await bot.delete_message(chat_id, message_id)
-    except Exception:
-        pass
-
-async def _restore_main_keyboard(uid: int):
-    """Восстанавливает постоянную клавиатуру и показывает сообщение о сохранении."""
-    lang = await get_lang(uid)
-    await bot.send_message(uid, await t(uid, "delivery_saved"), reply_markup=main_menu(lang))
-
 async def _start_delivery_form(target, uid: int):
     """Запускает пошаговое заполнение данных доставки."""
     state = dp.current_state(user=uid, chat=uid)
     await state.set_state(DeliveryForm.name)
 
+    kb = ReplyKeyboardRemove()
     if hasattr(target, "message"):
-        sent = await target.message.answer(await t(uid, "delivery_enter_name"), reply_markup=ReplyKeyboardRemove())
+        await target.message.answer(await t(uid, "delivery_enter_name"), reply_markup=kb)
     else:
-        sent = await target.answer(await t(uid, "delivery_enter_name"), reply_markup=ReplyKeyboardRemove())
-    await state.update_data(last_bot_msg_id=sent.message_id)
+        await target.answer(await t(uid, "delivery_enter_name"), reply_markup=kb)
 
 @dp.message_handler(state=DeliveryForm.name)
 async def delivery_got_name(message: types.Message, state: FSMContext):
     uid = message.from_user.id
-    data = await state.get_data()
-    await _try_delete(uid, data.get("last_bot_msg_id"))
-    await _try_delete(uid, message.message_id)
     await state.update_data(full_name=message.text.strip())
 
     phone_kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     phone_kb.add(KeyboardButton(await t(uid, "delivery_share_phone_btn"), request_contact=True))
 
-    sent = await bot.send_message(uid, await t(uid, "delivery_enter_phone"), reply_markup=phone_kb)
-    await state.update_data(last_bot_msg_id=sent.message_id)
+    await message.answer(await t(uid, "delivery_enter_phone"), reply_markup=phone_kb)
     await state.set_state(DeliveryForm.phone)
 
 @dp.message_handler(state=DeliveryForm.phone, content_types=[types.ContentType.CONTACT, types.ContentType.TEXT])
 async def delivery_got_phone(message: types.Message, state: FSMContext):
     uid = message.from_user.id
-    data = await state.get_data()
-    await _try_delete(uid, data.get("last_bot_msg_id"))
-    await _try_delete(uid, message.message_id)
 
     if message.contact:
         phone = message.contact.phone_number
     else:
         phone = message.text.strip()
+
     await state.update_data(phone=phone)
 
-    sent = await bot.send_message(uid, await t(uid, "delivery_enter_address"), reply_markup=ReplyKeyboardRemove())
-    await state.update_data(last_bot_msg_id=sent.message_id)
+    addr_text = await t(uid, "delivery_enter_address")
+    await message.answer(addr_text, reply_markup=ReplyKeyboardRemove())
     await state.set_state(DeliveryForm.address)
 
 @dp.message_handler(state=DeliveryForm.address)
 async def delivery_got_address(message: types.Message, state: FSMContext):
     uid = message.from_user.id
-    data = await state.get_data()
     raw = message.text.strip()
 
+    # Разбиваем по точке: "Bundesland. Stadt. Straße"
     parts = [p.strip() for p in raw.split(".") if p.strip()]
     if len(parts) < 3:
-        await _try_delete(uid, message.message_id)
-        sent = await bot.send_message(uid, await t(uid, "delivery_enter_address"))
-        await state.update_data(last_bot_msg_id=sent.message_id)
+        await message.answer(await t(uid, "delivery_enter_address"))
         return
-
-    await _try_delete(uid, data.get("last_bot_msg_id"))
-    await _try_delete(uid, message.message_id)
 
     bundesland = parts[0]
     stadt = parts[1]
-    strasse = ". ".join(parts[2:])
+    strasse = ". ".join(parts[2:])  # Остаток — улица (может содержать точки)
+
     await state.update_data(bundesland=bundesland, stadt=stadt, strasse=strasse)
 
     kb = InlineKeyboardMarkup()
@@ -3300,8 +3290,7 @@ async def delivery_got_address(message: types.Message, state: FSMContext):
         InlineKeyboardButton(await t(uid, "delivery_tracking_yes"), callback_data="delivery_track_yes"),
         InlineKeyboardButton(await t(uid, "delivery_tracking_no"), callback_data="delivery_track_no"),
     )
-    sent = await bot.send_message(uid, await t(uid, "delivery_choose_tracking"), reply_markup=kb)
-    await state.update_data(last_bot_msg_id=sent.message_id)
+    await message.answer(await t(uid, "delivery_choose_tracking"), reply_markup=kb)
     await state.set_state(DeliveryForm.tracking)
 
 @dp.callback_query_handler(lambda c: c.data in ("delivery_track_yes", "delivery_track_no"), state=DeliveryForm.tracking)
@@ -3309,7 +3298,7 @@ async def delivery_got_tracking(call: types.CallbackQuery, state: FSMContext):
     uid = call.from_user.id
     with_tracking = call.data == "delivery_track_yes"
     await state.update_data(with_tracking=with_tracking)
-    await _try_delete(uid, call.message.message_id)
+
     data = await state.get_data()
     await _show_delivery_confirm(call, uid, data)
 
@@ -3339,19 +3328,15 @@ async def _show_delivery_confirm(target, uid: int, data: dict):
     )
 
     if hasattr(target, "message"):
-        sent = await target.message.answer(text, reply_markup=kb)
+        await target.message.answer(text, reply_markup=kb)
     else:
-        sent = await target.answer(text, reply_markup=kb)
-    await dp.current_state(user=uid, chat=uid).update_data(confirm_msg_id=sent.message_id)
+        await target.answer(text, reply_markup=kb)
 
 @dp.callback_query_handler(lambda c: c.data == "delivery_confirm", state=DeliveryForm.tracking)
 async def delivery_confirm_data(call: types.CallbackQuery, state: FSMContext):
     uid = call.from_user.id
     data = await state.get_data()
     await state.finish()
-
-    # Удаляем сообщение с проверкой данных
-    await _try_delete(uid, data.get("confirm_msg_id", call.message.message_id))
 
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -3369,14 +3354,13 @@ async def delivery_confirm_data(call: types.CallbackQuery, state: FSMContext):
              data["bundesland"], data["stadt"], data["strasse"],
              data.get("with_tracking", True))
 
-    # Восстанавливаем клавиатуру и показываем сообщение о сохранении одним вызовом
-    await _restore_main_keyboard(uid)
+    await call.message.answer(await t(uid, "delivery_saved"))
+    # Показываем экран оплаты
     await _show_payment_screen(call, uid)
 
 @dp.callback_query_handler(lambda c: c.data == "delivery_refill", state=DeliveryForm.tracking)
 async def delivery_refill(call: types.CallbackQuery, state: FSMContext):
     uid = call.from_user.id
-    await _try_delete(uid, call.message.message_id)
     await state.finish()
     await _start_delivery_form(call, uid)
 
@@ -3510,9 +3494,16 @@ async def profile_delivery(call: types.CallbackQuery):
     )
 
     kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "delivery_refill_btn"), callback_data="profile_delivery_refill"))
     kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data="profile"))
 
     await render(call, text, kb)
+
+@dp.callback_query_handler(lambda c: c.data == "profile_delivery_refill")
+async def profile_delivery_refill(call: types.CallbackQuery):
+    uid = call.from_user.id
+    await call.answer()
+    await _start_delivery_form(call, uid)
 
 # ========== ОПЛАТА ==========
 
