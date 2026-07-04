@@ -2703,6 +2703,44 @@ async def gift_view(call):
 
     await render(call, text, kb, photo=img)
 
+
+@dp.callback_query_handler(lambda c: c.data.startswith("gift_delivery_view_"))
+async def gift_delivery_view(call):
+    """Просмотр товара для бесплатной банки в режиме доставки."""
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+    pid = int(call.data.split("gift_delivery_view_")[1])
+
+    async with pool.acquire() as conn:
+        bonus = await conn.fetchval(
+            "SELECT free_jar_bonus FROM users WHERE user_id=$1", uid
+        )
+
+    if not bonus:
+        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
+        return
+
+    async with pool.acquire() as conn:
+        p = await conn.fetchrow("SELECT * FROM products WHERE id=$1", pid)
+
+    lang = await get_lang(uid)
+    name = p[f"name_{lang}"]
+    desc = p[f"desc_{lang}"]
+    img = p["image"]
+    category = p["category"] or "elfliq"
+
+    text = f"{name}\n\n{desc}"
+
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("⬅️", callback_data=f"gift_delivery_cat_{category}"),
+        InlineKeyboardButton(await t(uid, "select_gift_btn"), callback_data=f"gift_delivery_confirm_{pid}")
+    )
+
+    await render(call, text, kb, photo=img)
+
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_confirm_"))
 async def gift_confirm(call):
     if not await check_not_banned(call):
@@ -2738,6 +2776,47 @@ async def gift_confirm(call):
     kb.add(
         InlineKeyboardButton(await t(uid, "confirm"), callback_data=f"gift_apply_{pid}"),
         InlineKeyboardButton(await t(uid, "gift_cancel"), callback_data=f"gift_view_{pid}")
+    )
+
+    await render(call, text, kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("gift_delivery_confirm_"))
+async def gift_delivery_confirm(call):
+    """Экран подтверждения выбора товара для доставки."""
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+    pid = int(call.data.split("gift_delivery_confirm_")[1])
+
+    async with pool.acquire() as conn:
+        bonus = await conn.fetchval(
+            "SELECT free_jar_bonus FROM users WHERE user_id=$1", uid
+        )
+
+    if not bonus:
+        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
+        return
+
+    async with pool.acquire() as conn:
+        p = await conn.fetchrow(
+            "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
+        )
+
+    lang = await get_lang(uid)
+    name = p[f"name_{lang}"]
+
+    text = (
+        f"{await t(uid, 'gift_confirm_title')}\n\n"
+        f"{name}\n\n"
+        f"{await t(uid, 'gift_confirm_question')}"
+    )
+
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton(await t(uid, "confirm"), callback_data=f"gift_delivery_apply_{pid}"),
+        InlineKeyboardButton(await t(uid, "gift_cancel"), callback_data=f"gift_delivery_view_{pid}")
     )
 
     await render(call, text, kb)
@@ -2811,7 +2890,75 @@ async def gift_apply(call):
     # Подтверждение пользователю
     await render(call, await t(uid, "gift_done"))
 
-async def _sync_gift_admins(request_id: int, status_line: str):
+
+@dp.callback_query_handler(lambda c: c.data.startswith("gift_delivery_apply_"))
+async def gift_delivery_apply(call):
+    """Финальное подтверждение бесплатной банки с доставкой."""
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+    pid = int(call.data.split("gift_delivery_apply_")[1])
+    username = call.from_user.username or "unknown"
+
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval("""
+            UPDATE users
+            SET free_jar_bonus = 0
+            WHERE user_id=$1 AND free_jar_bonus = 1
+            RETURNING user_id
+        """, uid)
+
+    if not updated:
+        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
+        return
+
+    async with pool.acquire() as conn:
+        p = await conn.fetchrow(
+            "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
+        )
+
+    name_ru = p["name_ru"]
+    lang = await get_lang(uid)
+    name = p[f"name_{lang}"]
+
+    async with pool.acquire() as conn:
+        request_id = await conn.fetchval("""
+            INSERT INTO gift_requests (user_id, product_id, username)
+            VALUES ($1, $2, $3)
+            RETURNING id
+        """, uid, pid, username)
+
+    # Блок данных доставки для администратора
+    delivery_block = await _build_delivery_admin_block(uid)
+
+    admin_text = (
+        f"🎁 Бесплатная банка (ДОСТАВКА)\n\n"
+        f"Пользователь: @{username}\n\n"
+        f"Выбранный товар:\n{name_ru}"
+        f"{delivery_block}"
+    )
+
+    admin_kb = InlineKeyboardMarkup()
+    admin_kb.add(
+        InlineKeyboardButton("✅ Выдано", callback_data=f"gift_issued_{request_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"gift_rejected_{request_id}")
+    )
+
+    msg_ids = []
+    for admin_id in ADMIN_IDS:
+        try:
+            sent = await bot.send_message(admin_id, admin_text, reply_markup=admin_kb)
+            msg_ids.append(f"{admin_id}:{sent.message_id}")
+        except Exception:
+            pass
+
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE gift_requests SET admin_message_ids=$1 WHERE id=$2
+        """, ",".join(msg_ids), request_id)
+
+    await render(call, await t(uid, "gift_done"))
     """Обновляет или пересылает сообщение всем админам по заявке на подарок."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
