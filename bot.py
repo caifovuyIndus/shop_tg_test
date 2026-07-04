@@ -685,9 +685,10 @@ TEXTS = {
         "delivery_enter_phone": "📞 Введите номер телефона или нажмите кнопку:",
         "delivery_share_phone_btn": "📱 Отправить мой номер",
         "delivery_enter_address": "📍 Введите адрес в формате:\n\nBundesland. Stadt. Straße",
-        "delivery_choose_tracking": "🚚 Выберите тип доставки:",
-        "delivery_tracking_yes": "✅ С трек-номером — 6.20€",
-        "delivery_tracking_no": "❌ Без трек-номера — 4.20€",
+        "delivery_choose_tracking": "📦 Выберите вариант доставки\n\n✅ С трек-номером — 7.20€\n\n❌ Без трек-номера — 5.20€",
+        "delivery_tracking_yes": "✅ С трек-номером",
+        "delivery_tracking_no": "❌ Без трек-номера",
+        "delivery_tracking_cost_text": "📦 Выберите вариант доставки\n\n✅ С трек-номером — 7.20€\n\n❌ Без трек-номера — 5.20€",
         "delivery_confirm_title": "📦 Проверьте данные доставки",
         "delivery_name_label": "Имя:",
         "delivery_phone_label": "Телефон:",
@@ -700,6 +701,10 @@ TEXTS = {
         "delivery_profile_title": "📦 Адрес доставки",
         "delivery_test_pay": "🧪 Тестовая оплата (DEV)",
         "delivery_test_pay_done": "✅ Тестовый заказ оформлен. Заказ передан в обработку.",
+        "gift_delivery_free": "🎁 Для бесплатной банки доставка также полностью бесплатна.",
+        "gift_choose_mode": "Как хочешь получить бесплатную банку?",
+        "gift_mode_delivery": "📦 Доставка",
+        "gift_mode_pickup": "📍 Самовывоз",
     },
 
     "ua": {
@@ -852,9 +857,10 @@ TEXTS = {
         "delivery_enter_phone": "📞 Введіть номер телефону або натисніть кнопку:",
         "delivery_share_phone_btn": "📱 Надіслати мій номер",
         "delivery_enter_address": "📍 Введіть адресу у форматі:\n\nBundesland. Stadt. Straße",
-        "delivery_choose_tracking": "🚚 Оберіть тип доставки:",
-        "delivery_tracking_yes": "✅ З трек-номером — 6.20€",
-        "delivery_tracking_no": "❌ Без трек-номера — 4.20€",
+        "delivery_choose_tracking": "📦 Оберіть варіант доставки\n\n✅ З трек-номером — 7.20€\n\n❌ Без трек-номера — 5.20€",
+        "delivery_tracking_yes": "✅ З трек-номером",
+        "delivery_tracking_no": "❌ Без трек-номера",
+        "delivery_tracking_cost_text": "📦 Оберіть варіант доставки\n\n✅ З трек-номером — 7.20€\n\n❌ Без трек-номера — 5.20€",
         "delivery_confirm_title": "📦 Перевірте дані доставки",
         "delivery_name_label": "Ім'я:",
         "delivery_phone_label": "Телефон:",
@@ -867,6 +873,10 @@ TEXTS = {
         "delivery_profile_title": "📦 Адреса доставки",
         "delivery_test_pay": "🧪 Тестова оплата (DEV)",
         "delivery_test_pay_done": "✅ Тестове замовлення оформлено. Замовлення передано в обробку.",
+        "gift_delivery_free": "🎁 Для безкоштовної банки доставка також повністю безкоштовна.",
+        "gift_choose_mode": "Як хочеш отримати безкоштовну банку?",
+        "gift_mode_delivery": "📦 Доставка",
+        "gift_mode_pickup": "📍 Самовивіз",
     },
 
     "de": {
@@ -1020,9 +1030,10 @@ TEXTS = {
         "delivery_enter_phone": "📞 Telefonnummer eingeben oder Taste drücken:",
         "delivery_share_phone_btn": "📱 Meine Nummer senden",
         "delivery_enter_address": "📍 Adresse im Format eingeben:\n\nBundesland. Stadt. Straße",
-        "delivery_choose_tracking": "🚚 Versandart wählen:",
-        "delivery_tracking_yes": "✅ Mit Sendungsnummer — 6.20€",
-        "delivery_tracking_no": "❌ Ohne Sendungsnummer — 4.20€",
+        "delivery_choose_tracking": "📦 Versandart wählen\n\n✅ Mit Sendungsnummer — 7.20€\n\n❌ Ohne Sendungsnummer — 5.20€",
+        "delivery_tracking_yes": "✅ Mit Sendungsnummer",
+        "delivery_tracking_no": "❌ Ohne Sendungsnummer",
+        "delivery_tracking_cost_text": "📦 Versandart wählen\n\n✅ Mit Sendungsnummer — 7.20€\n\n❌ Ohne Sendungsnummer — 5.20€",
         "delivery_confirm_title": "📦 Lieferdaten prüfen",
         "delivery_name_label": "Name:",
         "delivery_phone_label": "Telefon:",
@@ -1035,6 +1046,10 @@ TEXTS = {
         "delivery_profile_title": "📦 Lieferadresse",
         "delivery_test_pay": "🧪 Testzahlung (DEV)",
         "delivery_test_pay_done": "✅ Testbestellung aufgegeben. Bestellung wird bearbeitet.",
+        "gift_delivery_free": "🎁 Für die Gratis-Dose ist die Lieferung ebenfalls vollständig kostenlos.",
+        "gift_choose_mode": "Wie möchtest du die Gratis-Dose erhalten?",
+        "gift_mode_delivery": "📦 Lieferung",
+        "gift_mode_pickup": "📍 Abholung",
     }
 }
 
@@ -2404,6 +2419,52 @@ async def open_gift_shop(call):
         await call.answer(await t(uid, "gift_already_used"), show_alert=True)
         return
 
+    # Показываем выбор режима получения
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton(await t(uid, "gift_mode_delivery"), callback_data="gift_mode_delivery"),
+        InlineKeyboardButton(await t(uid, "gift_mode_pickup"), callback_data="gift_mode_pickup"),
+    )
+    await render(call, await t(uid, "gift_choose_mode"), kb)
+
+@dp.callback_query_handler(lambda c: c.data in ("gift_mode_delivery", "gift_mode_pickup"))
+async def gift_choose_mode(call):
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+
+    async with pool.acquire() as conn:
+        bonus = await conn.fetchval(
+            "SELECT free_jar_bonus FROM users WHERE user_id=$1", uid
+        )
+
+    if not bonus:
+        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
+        return
+
+    gift_mode = "delivery" if call.data == "gift_mode_delivery" else "pickup"
+    await call.answer()
+
+    if gift_mode == "delivery":
+        # Сохраняем режим и информируем о бесплатной доставке
+        await set_cart_mode(uid, "delivery")
+        info = await get_delivery_info(uid)
+        if not info:
+            # Нужно заполнить адрес — запускаем FSM, после него gift shop
+            # Сохраняем флаг, что FSM запущен из gift flow
+            state = dp.current_state(user=uid, chat=uid)
+            await state.update_data(gift_flow=True)
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton(await t(uid, "gift_mode_delivery"), callback_data="gift_mode_delivery"))
+            await call.message.answer(await t(uid, "gift_delivery_free"))
+            await _start_delivery_form(call, uid)
+            return
+        else:
+            await call.message.answer(await t(uid, "gift_delivery_free"))
+    else:
+        await set_cart_mode(uid, "pickup")
+
     await render_category_selection(call, uid, mode="gift")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_cat_"))
@@ -2567,10 +2628,27 @@ async def gift_apply(call):
             RETURNING id
         """, uid, pid, username)
 
+    gift_cart_mode = await get_cart_mode(uid)
+    gift_delivery_block = ""
+    if gift_cart_mode == "delivery":
+        gift_delivery_info = await get_delivery_info(uid)
+        if gift_delivery_info:
+            tracking_mark = "✅" if gift_delivery_info["with_tracking"] else "❌"
+            gift_delivery_block = (
+                f"\n\n📦 ДОСТАВКА:\n"
+                f"Имя: {gift_delivery_info['full_name']}\n"
+                f"Телефон: {gift_delivery_info['phone']}\n"
+                f"Bundesland: {gift_delivery_info['bundesland']}\n"
+                f"Stadt: {gift_delivery_info['stadt']}\n"
+                f"Straße: {gift_delivery_info['strasse']}\n"
+                f"Трек-номер: {tracking_mark}"
+            )
+
     admin_text = (
         f"🎁 Бесплатная банка\n\n"
         f"Пользователь: @{username}\n\n"
         f"Выбранный товар:\n{name_ru}"
+        f"{gift_delivery_block}"
     )
 
     admin_kb = InlineKeyboardMarkup()
@@ -3213,31 +3291,50 @@ async def set_mode_pickup(call):
 
 # ========== FSM: ЗАПОЛНЕНИЕ ДАННЫХ ДОСТАВКИ ==========
 
+async def _try_delete(chat_id: int, message_id: int):
+    """Тихое удаление сообщения (игнорирует ошибки)."""
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
 async def _start_delivery_form(target, uid: int):
     """Запускает пошаговое заполнение данных доставки."""
     state = dp.current_state(user=uid, chat=uid)
     await state.set_state(DeliveryForm.name)
 
-    kb = ReplyKeyboardRemove()
     if hasattr(target, "message"):
-        await target.message.answer(await t(uid, "delivery_enter_name"), reply_markup=kb)
+        sent = await target.message.answer(await t(uid, "delivery_enter_name"), reply_markup=ReplyKeyboardRemove())
     else:
-        await target.answer(await t(uid, "delivery_enter_name"), reply_markup=kb)
+        sent = await target.answer(await t(uid, "delivery_enter_name"), reply_markup=ReplyKeyboardRemove())
+
+    await state.update_data(last_bot_msg_id=sent.message_id)
 
 @dp.message_handler(state=DeliveryForm.name)
 async def delivery_got_name(message: types.Message, state: FSMContext):
     uid = message.from_user.id
+    data = await state.get_data()
+
+    # Удаляем предыдущий вопрос бота и ответ пользователя
+    await _try_delete(uid, data.get("last_bot_msg_id"))
+    await _try_delete(uid, message.message_id)
+
     await state.update_data(full_name=message.text.strip())
 
     phone_kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     phone_kb.add(KeyboardButton(await t(uid, "delivery_share_phone_btn"), request_contact=True))
 
-    await message.answer(await t(uid, "delivery_enter_phone"), reply_markup=phone_kb)
+    sent = await bot.send_message(uid, await t(uid, "delivery_enter_phone"), reply_markup=phone_kb)
+    await state.update_data(last_bot_msg_id=sent.message_id)
     await state.set_state(DeliveryForm.phone)
 
 @dp.message_handler(state=DeliveryForm.phone, content_types=[types.ContentType.CONTACT, types.ContentType.TEXT])
 async def delivery_got_phone(message: types.Message, state: FSMContext):
     uid = message.from_user.id
+    data = await state.get_data()
+
+    await _try_delete(uid, data.get("last_bot_msg_id"))
+    await _try_delete(uid, message.message_id)
 
     if message.contact:
         phone = message.contact.phone_number
@@ -3246,24 +3343,30 @@ async def delivery_got_phone(message: types.Message, state: FSMContext):
 
     await state.update_data(phone=phone)
 
-    addr_text = await t(uid, "delivery_enter_address")
-    await message.answer(addr_text, reply_markup=ReplyKeyboardRemove())
+    sent = await bot.send_message(uid, await t(uid, "delivery_enter_address"), reply_markup=ReplyKeyboardRemove())
+    await state.update_data(last_bot_msg_id=sent.message_id)
     await state.set_state(DeliveryForm.address)
 
 @dp.message_handler(state=DeliveryForm.address)
 async def delivery_got_address(message: types.Message, state: FSMContext):
     uid = message.from_user.id
+    data = await state.get_data()
     raw = message.text.strip()
 
     # Разбиваем по точке: "Bundesland. Stadt. Straße"
     parts = [p.strip() for p in raw.split(".") if p.strip()]
     if len(parts) < 3:
-        await message.answer(await t(uid, "delivery_enter_address"))
+        await _try_delete(uid, message.message_id)
+        sent = await bot.send_message(uid, await t(uid, "delivery_enter_address"))
+        await state.update_data(last_bot_msg_id=sent.message_id)
         return
+
+    await _try_delete(uid, data.get("last_bot_msg_id"))
+    await _try_delete(uid, message.message_id)
 
     bundesland = parts[0]
     stadt = parts[1]
-    strasse = ". ".join(parts[2:])  # Остаток — улица (может содержать точки)
+    strasse = ". ".join(parts[2:])
 
     await state.update_data(bundesland=bundesland, stadt=stadt, strasse=strasse)
 
@@ -3272,7 +3375,8 @@ async def delivery_got_address(message: types.Message, state: FSMContext):
         InlineKeyboardButton(await t(uid, "delivery_tracking_yes"), callback_data="delivery_track_yes"),
         InlineKeyboardButton(await t(uid, "delivery_tracking_no"), callback_data="delivery_track_no"),
     )
-    await message.answer(await t(uid, "delivery_choose_tracking"), reply_markup=kb)
+    sent = await bot.send_message(uid, await t(uid, "delivery_choose_tracking"), reply_markup=kb)
+    await state.update_data(last_bot_msg_id=sent.message_id)
     await state.set_state(DeliveryForm.tracking)
 
 @dp.callback_query_handler(lambda c: c.data in ("delivery_track_yes", "delivery_track_no"), state=DeliveryForm.tracking)
@@ -3280,6 +3384,9 @@ async def delivery_got_tracking(call: types.CallbackQuery, state: FSMContext):
     uid = call.from_user.id
     with_tracking = call.data == "delivery_track_yes"
     await state.update_data(with_tracking=with_tracking)
+
+    # Удаляем сообщение с выбором трекинга
+    await _try_delete(uid, call.message.message_id)
 
     data = await state.get_data()
     await _show_delivery_confirm(call, uid, data)
@@ -3314,6 +3421,11 @@ async def _show_delivery_confirm(target, uid: int, data: dict):
     else:
         await target.answer(text, reply_markup=kb)
 
+async def _restore_main_keyboard(uid: int):
+    """Восстанавливает постоянную клавиатуру после завершения FSM."""
+    lang = await get_lang(uid)
+    await bot.send_message(uid, "\u200b", reply_markup=main_menu(lang))
+
 @dp.callback_query_handler(lambda c: c.data == "delivery_confirm", state=DeliveryForm.tracking)
 async def delivery_confirm_data(call: types.CallbackQuery, state: FSMContext):
     uid = call.from_user.id
@@ -3336,9 +3448,16 @@ async def delivery_confirm_data(call: types.CallbackQuery, state: FSMContext):
              data["bundesland"], data["stadt"], data["strasse"],
              data.get("with_tracking", True))
 
+    gift_flow = data.get("gift_flow", False)
+    await _restore_main_keyboard(uid)
     await call.message.answer(await t(uid, "delivery_saved"))
-    # Показываем экран оплаты
-    await _show_payment_screen(call, uid)
+
+    if gift_flow:
+        # Возвращаем в гифт-шоп
+        await render_category_selection(call, uid, mode="gift")
+    else:
+        # Показываем экран оплаты
+        await _show_payment_screen(call, uid)
 
 @dp.callback_query_handler(lambda c: c.data == "delivery_refill", state=DeliveryForm.tracking)
 async def delivery_refill(call: types.CallbackQuery, state: FSMContext):
@@ -3476,9 +3595,16 @@ async def profile_delivery(call: types.CallbackQuery):
     )
 
     kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "delivery_refill_btn"), callback_data="profile_delivery_refill"))
     kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data="profile"))
 
     await render(call, text, kb)
+
+@dp.callback_query_handler(lambda c: c.data == "profile_delivery_refill")
+async def profile_delivery_refill(call: types.CallbackQuery):
+    uid = call.from_user.id
+    await call.answer()
+    await _start_delivery_form(call, uid)
 
 # ========== ОПЛАТА ==========
 
