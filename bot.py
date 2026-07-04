@@ -3,7 +3,7 @@ import psycopg2
 import os
 import asyncio
 import asyncpg
-import random 
+import random
 import aiohttp
 from datetime import date, timedelta, datetime
 from urllib.parse import quote
@@ -539,7 +539,7 @@ products_elfworld = [
 "Взрыв радужных фруктовых конфет прямо во рту — сладкий, яркий и безумно вкусный вкус любимых скиттлов в каждой затяжке.",
 "Вибух веселкових фруктових цукерок прямо в роті — солодкий, яскравий і шалено смачний смак улюблених скітлс у кожній затяжці.",
 "Regenbogen-Fruchtbonbons pur – süß, bunt und genau so wie die Originalsweets.",
-15,"",0),
+15,"AgACAgIAAxkBAAPuakP8fRZ3kA1u9qI30vN75PCQTHYAApUdaxtgoSFKx_cKNnpc1DwBAAMCAAN5AAM8BA",1),
 ]
 
 
@@ -2589,9 +2589,9 @@ async def _gift_start_delivery_form(call, uid):
     except Exception:
         pass
     await DeliveryForm.name.set()
-    await bot.send_message(uid, await t(uid, "delivery_step_name"), reply_markup=ReplyKeyboardRemove())
-    # После завершения формы пользователь попадёт в show_delivery_confirm(from_pay=False)
-    # → delivery_confirmed_save → мы вернём его в open_gift_shop
+    sent = await bot.send_message(uid, await t(uid, "delivery_step_name"), reply_markup=ReplyKeyboardRemove())
+    # from_pay=False — после подтверждения адреса открываем профиль, не оплату
+    await dp.storage.update_data(chat=uid, user=uid, data={"last_bot_msg": sent.message_id, "from_pay": False, "gift_flow": True})
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_cat_"))
@@ -3449,23 +3449,31 @@ async def noop(call):
     await call.answer()
 # ========== ДОСТАВКА: ФОРМА ==========
 
-async def start_delivery_form(target, uid):
+async def start_delivery_form(target, uid, from_pay: bool = False):
     """Запускает форму с шага 1 — запрос имени."""
     await DeliveryForm.name.set()
     sent = await bot.send_message(uid, await t(uid, "delivery_step_name"), reply_markup=ReplyKeyboardRemove())
-    # Сохраняем message_id чтобы удалить после ответа пользователя
-    await dp.storage.update_data(chat=uid, user=uid, data={"last_bot_msg": sent.message_id})
+    # Сохраняем message_id чтобы удалить после ответа пользователя, и контекст запуска
+    await dp.storage.update_data(chat=uid, user=uid, data={"last_bot_msg": sent.message_id, "from_pay": from_pay})
 
 
-async def show_delivery_confirm(target, uid, data: dict, from_pay: bool = False):
+async def show_delivery_confirm(target, uid, data: dict, from_pay: bool = False, gift_flow: bool = False):
     """Показывает блок данных доставки с кнопками Подтвердить / Заново."""
     text = await format_delivery_block(uid, data)
 
     kb = InlineKeyboardMarkup()
-    confirm_cb = "delivery_confirmed_pay" if from_pay else "delivery_confirmed_save"
+    if gift_flow:
+        confirm_cb = "delivery_confirmed_gift"
+        refill_cb  = "delivery_refill_gift"
+    elif from_pay:
+        confirm_cb = "delivery_confirmed_pay"
+        refill_cb  = "delivery_refill_pay"
+    else:
+        confirm_cb = "delivery_confirmed_save"
+        refill_cb  = "delivery_refill_save"
     kb.add(
         InlineKeyboardButton(await t(uid, "delivery_confirm_btn"), callback_data=confirm_cb),
-        InlineKeyboardButton(await t(uid, "delivery_refill_btn"), callback_data="delivery_refill"),
+        InlineKeyboardButton(await t(uid, "delivery_refill_btn"),  callback_data=refill_cb),
     )
 
     # Восстанавливаем главную клавиатуру отдельным сообщением,
@@ -3598,18 +3606,24 @@ async def delivery_got_tracking(call: types.CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
-    await show_delivery_confirm(call, uid, delivery_data, from_pay=True)
+    # Используем контекст запуска: если форма открылась из оплаты — ведём к оплате,
+    # если из профиля — показываем окно проверки адреса через профиль,
+    # если из gift-потока — возвращаем в gift-магазин
+    from_pay  = data.get("from_pay", False)
+    gift_flow = data.get("gift_flow", False)
+    await show_delivery_confirm(call, uid, delivery_data, from_pay=from_pay, gift_flow=gift_flow)
 
 
-@dp.callback_query_handler(lambda c: c.data == "delivery_refill")
+@dp.callback_query_handler(lambda c: c.data in ("delivery_refill", "delivery_refill_pay", "delivery_refill_save"))
 async def delivery_refill(call):
     uid = call.from_user.id
+    from_pay = (call.data == "delivery_refill_pay")
     await call.answer()
     try:
         await call.message.delete()
     except Exception:
         pass
-    await start_delivery_form(call, uid)
+    await start_delivery_form(call, uid, from_pay=from_pay)
 
 
 @dp.callback_query_handler(lambda c: c.data == "delivery_confirmed_pay")
@@ -3641,6 +3655,33 @@ async def delivery_confirmed_save(call):
     await call.answer("✅")
     await render_profile(call)
 
+
+@dp.callback_query_handler(lambda c: c.data == "delivery_confirmed_gift")
+async def delivery_confirmed_gift(call):
+    """Адрес подтверждён из gift-потока — возвращаем в gift-магазин."""
+    uid = call.from_user.id
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET delivery_saved=true WHERE user_id=$1", uid
+        )
+
+    await call.answer("✅")
+    # Возвращаем в выбор режима доставки для подарка
+    await open_gift_shop(call)
+
+
+@dp.callback_query_handler(lambda c: c.data == "delivery_refill_gift")
+async def delivery_refill_gift(call):
+    """Перезаполнение адреса из gift-потока."""
+    uid = call.from_user.id
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await _gift_start_delivery_form(call, uid)
+
 # ========== ОПЛАТА ==========
 
 @dp.callback_query_handler(lambda c: c.data == "pay")
@@ -3655,7 +3696,7 @@ async def pay(call):
         delivery_data = await get_delivery_data(uid)
         if not delivery_data:
             # Первый раз — запускаем форму
-            await start_delivery_form(call, uid)
+            await start_delivery_form(call, uid, from_pay=True)
             return
         else:
             # Данные уже есть — показываем их и просим подтвердить
