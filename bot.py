@@ -466,7 +466,7 @@ products = [
 "Освежающий розовый лимонад — идеальный баланс сладости и кислинки с лёгким летним настроением.",
 "Освіжаючий рожевий лимонад — ідеальний баланс солодкого і кислого.",
 "Pink Lemonade – perfekte Balance aus süß und sauer mit sommerlichem Gefühl.",
-15,"AgACAgIAAxkBAAIGAWnOrPWAFiKrCXUlDsfjTUmG4FeEAAInFGsb4PR4SpGa5bcwZXbHAQADAgADeAADOgQ",1),
+15,"",0),
 ]
 
 # ========== ТОВАРЫ: РАЗДЕЛ ELFWORLD (заготовка) ==========
