@@ -3121,7 +3121,7 @@ async def render_category_shop(target, uid, category):
     kb.add(InlineKeyboardButton(await t(uid, switch_key), callback_data=f"shop_cat_{other_category}"))
 
     toggle_label = await t(uid, "delivery_mode_off" if delivery else "delivery_mode_on")
-    kb.add(InlineKeyboardButton(toggle_label, callback_data="toggle_delivery_mode"))
+    kb.add(InlineKeyboardButton(toggle_label, callback_data=f"toggle_delivery_mode_cat_{category}"))
 
     kb.add(
         InlineKeyboardButton(await t(uid,"cart"), callback_data="open_cart"),
@@ -3146,12 +3146,17 @@ async def shop_category(call):
     category = call.data.split("shop_cat_")[1]
     await render_category_shop(call, call.from_user.id, category)
 
-@dp.callback_query_handler(lambda c: c.data == "toggle_delivery_mode")
+@dp.callback_query_handler(lambda c: c.data == "toggle_delivery_mode" or c.data.startswith("toggle_delivery_mode_cat_"))
 async def toggle_delivery_mode(call):
     if not await check_not_banned(call):
         return
 
     uid = call.from_user.id
+
+    # Определяем контекст: находимся ли мы внутри конкретного раздела
+    category = None
+    if call.data.startswith("toggle_delivery_mode_cat_"):
+        category = call.data.split("toggle_delivery_mode_cat_")[1]
 
     async with pool.acquire() as conn:
         user = await conn.fetchrow("""
@@ -3180,7 +3185,13 @@ async def toggle_delivery_mode(call):
 
     toggle_key = "delivery_mode_toggle_on" if new_delivery else "delivery_mode_toggle_off"
     await call.answer(await t(uid, toggle_key))
-    await render_category_selection(call, uid, mode="shop")
+
+    # Редактируем текущее сообщение: если были в разделе — остаёмся в нём,
+    # если на экране выбора раздела — обновляем его (аналогично elfliq/elfworld)
+    if category:
+        await render_category_shop(call, uid, category)
+    else:
+        await render_category_selection(call, uid, mode="shop")
 
 @dp.callback_query_handler(lambda c: c.data == "open_cart")
 async def open_cart(call):
@@ -3348,7 +3359,10 @@ async def render_cart(target, uid):
     if discount > 0:
         text += "\n" + (await t(uid,"savings")).format(value=discount)
 
-    text += "\n\n" + await t(uid, "free_delivery_hint")
+    # Подсказка про бесплатную доставку — только в режиме самовывоза
+    cart_mode = await get_cart_mode(uid)
+    if cart_mode != "delivery":
+        text += "\n\n" + await t(uid, "free_delivery_hint")
 
     kb.row(
         InlineKeyboardButton(await t(uid,"clear"), callback_data="clear"),
