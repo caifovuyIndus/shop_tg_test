@@ -245,11 +245,15 @@ async def init_db():
             ADD COLUMN IF NOT EXISTS delivery_saved BOOLEAN DEFAULT false
         """)
 
-        # Флаг и данные доставки непосредственно на заказе (snapshot на момент
-        # оформления — не зависит от будущих изменений в профиле пользователя).
+        # Флаг и данные доставки непосредственно на заказе.
         await conn.execute("""
             ALTER TABLE orders
             ADD COLUMN IF NOT EXISTS is_delivery BOOLEAN DEFAULT false
+        """)
+        # На старых деплоях колонка могла быть создана как INTEGER — приводим к BOOLEAN.
+        await conn.execute("""
+            ALTER TABLE orders
+            ALTER COLUMN is_delivery TYPE BOOLEAN USING is_delivery::boolean
         """)
         await conn.execute("""
             ALTER TABLE orders
@@ -3555,7 +3559,7 @@ async def test_delivery_pay(call):
                 (user_id, items, total, payment, discount,
                  is_delivery, delivery_name, delivery_phone,
                  delivery_address, delivery_tracking)
-            VALUES ($1,$2,$3,'test_delivery',$4,true,$5,$6,$7,$8)
+            VALUES ($1,$2,$3,'test_delivery',$4,1,$5,$6,$7,$8)
             RETURNING id
         """, uid, items_str, total, discount,
              drow["delivery_name"], drow["delivery_phone"],
