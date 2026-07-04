@@ -3091,7 +3091,10 @@ async def render_category_shop(target, uid, category):
     else:
         text += f"💰 {base_price}€\n\n"
 
-    text += await t(uid, "free_delivery_hint") + "\n\n"
+    if delivery:
+        text += await t(uid, "free_delivery_hint") + "\n\n"
+    else:
+        
 
     kb = InlineKeyboardMarkup()
 
