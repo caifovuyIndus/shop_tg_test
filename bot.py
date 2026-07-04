@@ -20,15 +20,10 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 ADMIN_IDS = [7805603791, 8283121468, 5317145892] 
-CRYPTOBOT_TOKEN     = os.getenv("CRYPTOBOT_TOKEN", "604617:AAWqkQtz77IxSlpPJw6fzAHfGOlUeu88orQ")
-CRYPTOBOT_BASE      = "https://pay.crypt.bot/api"
-CRYPTOBOT_WEBHOOK_PORT = int(os.getenv("PORT", "8080"))
-CRYPTOBOT_WEBHOOK_PATH = "/cryptobot/webhook"
 def is_admin(uid):
     return uid in ADMIN_IDS 
 
 logging.basicConfig(level=logging.INFO)
-
 
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
@@ -279,11 +274,7 @@ async def init_db():
             ADD COLUMN IF NOT EXISTS delivery_tracking BOOLEAN
         """)
 
-        # CryptoBot invoice ID для сверки при подтверждении оплаты
-        await conn.execute("""
-            ALTER TABLE orders
-            ADD COLUMN IF NOT EXISTS cryptobot_invoice_id BIGINT
-        """)
+
 
         # Глобальная заморозка Buy Streak: каждая строка — один период
         # заморозки. ended_at IS NULL означает, что заморозка активна сейчас.
@@ -586,8 +577,6 @@ TEXTS = {
         "delivery_refill_btn": "🔄 Заполнить заново",
         "delivery_address_profile_btn": "📦 Адрес доставки",
         "delivery_no_cash": "🚚 Для доставки оплата наличными недоступна.",
-        "test_payment_btn": "🧪 Тестовая оплата",
-        "test_payment_confirm": "🧪 Тестовый заказ успешно оформлен!",
         "section_elfliq": "🧪 Elfliq",
         "section_elfworld": "🌍 Elfworld",
         "section_empty": "Раздел временно пуст",
@@ -600,12 +589,6 @@ TEXTS = {
         "back_shop": "🛒 Вернуться в магазин",
         "pay": "💳 Оплата",
         "cash": "💵 Наличные",
-        "usdt": "💳 CryptoBot / Банковская карта",
-        "cryptobot_pay_btn": "💳 Оплатить",
-        "cryptobot_payment_screen": "💶 Сумма заказа: {eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 К оплате:\n{usdt} USDT (Polygon)\n\n💳 Также можно оплатить банковской картой через CryptoBot.",
-        "cryptobot_success": "✅ Оплата успешно получена.\n\nВаш заказ передан в обработку.\n\nАдминистратор скоро свяжется с вами.",
-        "cryptobot_error": "❌ Не удалось создать счёт. Попробуйте ещё раз или выберите другой способ оплаты.",
-        "rate_unavailable": "⚠️ Не удалось получить курс USDT. Попробуй ещё раз через минуту.",
         "cancel": "❌ Отмена",
         "order_done": "Заказ оформлен. Админ скоро свяжется",
         "confirm_order": "Подтвердить заказ?",
@@ -717,6 +700,17 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено колёс: {count}",
         "stats_invited": "👥 Приглашено пользователей: {count}",
         "stats_total_spent": "💰 Всего потрачено: {value}€",
+        "pay_usdt_btn": "💵 USDT (TRC20)",
+        "pay_card_btn": "💳 Банковская карта",
+        "pay_currency_title": "💳 Выбери валюту оплаты:",
+        "pay_card_uah_btn": "🇺🇦 Оплата в гривне (UAH)",
+        "pay_card_eur_btn": "💶 Оплата в евро (EUR)",
+        "pay_usdt_screen": "💶 Сумма заказа:\n{eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 К оплате:\n{usdt} USDT (TRC20)\n\n📥 Адрес:\n`{wallet}`\n\nНажмите на адрес для копирования.",
+        "pay_card_eur_screen": "💶 Сумма заказа:\n{eur}€\n\n📥 Карта:\n`{card}`\n\nНажмите на номер карты для копирования.",
+        "pay_card_uah_screen": "💶 Сумма заказа:\n{eur}€\n\n💱 Курс:\n1 EUR = {rate} UAH\n\n💳 К оплате:\n{uah} UAH\n\n📥 Карта:\n`{card}`\n\nНажмите на номер карты для копирования.",
+        "pay_i_paid_btn": "✅ Я оплатил",
+        "pay_pending_user": "⏳ Оплата отправлена на проверку.\n\nАдминистратор свяжется с вами после подтверждения.",
+        "rate_unavailable": "⚠️ Не удалось получить курс. Попробуй ещё раз через минуту.",
     },
 
     "ua": {
@@ -759,8 +753,6 @@ TEXTS = {
         "delivery_refill_btn": "🔄 Заповнити знову",
         "delivery_address_profile_btn": "📦 Адреса доставки",
         "delivery_no_cash": "🚚 Для доставки оплата готівкою недоступна.",
-        "test_payment_btn": "🧪 Тестова оплата",
-        "test_payment_confirm": "🧪 Тестове замовлення успішно оформлено!",
         "section_elfliq": "🧪 Elfliq",
         "section_elfworld": "🌍 Elfworld",
         "section_empty": "Розділ тимчасово порожній",
@@ -773,12 +765,6 @@ TEXTS = {
         "back_shop": "🛒 Назад до магазину",
         "pay": "💳 Оплата",
         "cash": "💵 Готівка",
-        "usdt": "💳 CryptoBot / Банківська карта",
-        "cryptobot_pay_btn": "💳 Оплатити",
-        "cryptobot_payment_screen": "💶 Сума замовлення: {eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 До оплати:\n{usdt} USDT (Polygon)\n\n💳 Також можна оплатити банківською карткою через CryptoBot.",
-        "cryptobot_success": "✅ Оплата успішно отримана.\n\nВаше замовлення передано в обробку.\n\nАдміністратор незабаром зв'яжеться з вами.",
-        "cryptobot_error": "❌ Не вдалося створити рахунок. Спробуй ще раз або вибери інший спосіб оплати.",
-        "rate_unavailable": "⚠️ Не вдалося отримати курс USDT. Спробуй ще раз за хвилину.",
         "cancel": "❌ Скасувати",
         "order_done": "Замовлення оформлене. Адмін скоро зв'яжеться",
         "confirm_order": "Підтвердити замовлення?",
@@ -890,6 +876,17 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено коліс: {count}",
         "stats_invited": "👥 Запрошено користувачів: {count}",
         "stats_total_spent": "💰 Всього витрачено: {value}€",
+        "pay_usdt_btn": "💵 USDT (TRC20)",
+        "pay_card_btn": "💳 Банківська карта",
+        "pay_currency_title": "💳 Оберіть валюту оплати:",
+        "pay_card_uah_btn": "🇺🇦 Оплата в гривні (UAH)",
+        "pay_card_eur_btn": "💶 Оплата в євро (EUR)",
+        "pay_usdt_screen": "💶 Сума замовлення:\n{eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 До оплати:\n{usdt} USDT (TRC20)\n\n📥 Адреса:\n`{wallet}`\n\nНатисніть на адресу для копіювання.",
+        "pay_card_eur_screen": "💶 Сума замовлення:\n{eur}€\n\n📥 Карта:\n`{card}`\n\nНатисніть на номер картки для копіювання.",
+        "pay_card_uah_screen": "💶 Сума замовлення:\n{eur}€\n\n💱 Курс:\n1 EUR = {rate} UAH\n\n💳 До оплати:\n{uah} UAH\n\n📥 Карта:\n`{card}`\n\nНатисніть на номер картки для копіювання.",
+        "pay_i_paid_btn": "✅ Я оплатив",
+        "pay_pending_user": "⏳ Оплата надіслана на перевірку.\n\nАдміністратор зв'яжеться з вами після підтвердження.",
+        "rate_unavailable": "⚠️ Не вдалося отримати курс. Спробуй ще раз за хвилину.",
     },
 
     "de": {
@@ -932,8 +929,6 @@ TEXTS = {
         "delivery_refill_btn": "🔄 Neu ausfüllen",
         "delivery_address_profile_btn": "📦 Lieferadresse",
         "delivery_no_cash": "🚚 Für Lieferungen ist Barzahlung nicht verfügbar.",
-        "test_payment_btn": "🧪 Testzahlung",
-        "test_payment_confirm": "🧪 Testbestellung erfolgreich aufgegeben!",
         "section_elfliq": "🧪 Elfliq",
         "section_elfworld": "🌍 Elfworld",
         "section_empty": "Dieser Bereich ist momentan leer",
@@ -946,19 +941,12 @@ TEXTS = {
         "back_shop": "🛒 Zurück zum Shop",
         "pay": "💳 Zahlung",
         "cash": "💵 Bar",
-        "usdt": "💳 CryptoBot / Bankkarte",
-        "cryptobot_pay_btn": "💳 Bezahlen",
-        "cryptobot_payment_screen": "💶 Bestellsumme: {eur}€\n\n💲 Kurs:\n1 EUR = {rate} USDT\n\n💵 Zu zahlen:\n{usdt} USDT (Polygon)\n\n💳 Zahlung auch per Bankkarte über CryptoBot möglich.",
-        "cryptobot_success": "✅ Zahlung erfolgreich erhalten.\n\nIhre Bestellung wird bearbeitet.\n\nDer Admin meldet sich bald.",
-        "cryptobot_error": "❌ Rechnung konnte nicht erstellt werden. Bitte erneut versuchen oder andere Zahlungsart wählen.",
-        "rate_unavailable": "⚠️ Der USDT-Kurs konnte nicht abgerufen werden. Versuche es in einer Minute erneut.",
         "cancel": "❌ Abbrechen",
         "order_done": "Bestellung erstellt. Admin meldet sich",
         "confirm_order": "Bestellung bestätigen?",
         "confirm": "✅ Bestätigen",
         "paid": "✅ Bezahlt",
         "checking_payment": "Zahlung wird geprüft, Admin meldet sich",
-        "rate_unavailable": "⚠️ Der USDT-Kurs konnte nicht abgerufen werden. Versuche es in einer Minute erneut.",
         "fav_added": "Zu Favoriten hinzugefügt",
         "fav_removed": "Aus Favoriten entfernt",
         "favorites": "❤️ Favoriten",
@@ -1064,6 +1052,17 @@ TEXTS = {
         "stats_spins": "🎰 Gedrehte Räder: {count}",
         "stats_invited": "👥 Eingeladene Nutzer: {count}",
         "stats_total_spent": "💰 Insgesamt ausgegeben: {value}€",
+        "pay_usdt_btn": "💵 USDT (TRC20)",
+        "pay_card_btn": "💳 Bankkarte",
+        "pay_currency_title": "💳 Zahlungswährung wählen:",
+        "pay_card_uah_btn": "🇺🇦 Zahlung in Hrywnja (UAH)",
+        "pay_card_eur_btn": "💶 Zahlung in Euro (EUR)",
+        "pay_usdt_screen": "💶 Bestellsumme:\n{eur}€\n\n💲 Kurs:\n1 EUR = {rate} USDT\n\n💵 Zu zahlen:\n{usdt} USDT (TRC20)\n\n📥 Adresse:\n`{wallet}`\n\nAdresse antippen zum Kopieren.",
+        "pay_card_eur_screen": "💶 Bestellsumme:\n{eur}€\n\n📥 Karte:\n`{card}`\n\nKartennummer antippen zum Kopieren.",
+        "pay_card_uah_screen": "💶 Bestellsumme:\n{eur}€\n\n💱 Kurs:\n1 EUR = {rate} UAH\n\n💳 Zu zahlen:\n{uah} UAH\n\n📥 Karte:\n`{card}`\n\nKartennummer antippen zum Kopieren.",
+        "pay_i_paid_btn": "✅ Ich habe bezahlt",
+        "pay_pending_user": "⏳ Zahlung zur Überprüfung gesendet.\n\nDer Admin meldet sich nach der Bestätigung.",
+        "rate_unavailable": "⚠️ Kurs konnte nicht abgerufen werden. Versuche es in einer Minute erneut.",
     }
 }
 
@@ -1383,16 +1382,15 @@ async def format_delivery_block(uid, data: dict) -> str:
     )
     return text
 
-# ========== CRYPTOBOT ==========
+# ========== КУРСЫ ВАЛЮТ ==========
 
-CRYPTOBOT_HEADERS = {
-    "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
-    "Content-Type": "application/json",
-}
+# Кэш курсов для каждого пользователя: {uid: {"usdt": (rate, ts), "uah": (rate, ts)}}
+_rate_cache: dict = {}
+_RATE_TTL = 1800  # 30 минут
 
 
-async def get_eur_usdt_rate() -> float | None:
-    """Текущий курс 1 EUR -> USDT через Binance."""
+async def _fetch_eur_usdt() -> float | None:
+    """Получить актуальный курс EUR→USDT с Binance (fallback: CoinGecko)."""
     try:
         async with aiohttp.ClientSession() as session:
             resp = await session.get(
@@ -1401,7 +1399,7 @@ async def get_eur_usdt_rate() -> float | None:
                 timeout=aiohttp.ClientTimeout(total=5),
             )
             data = await resp.json()
-        return float(data["price"])
+        return round(float(data["price"]), 4)
     except Exception:
         try:
             async with aiohttp.ClientSession() as session:
@@ -1411,71 +1409,64 @@ async def get_eur_usdt_rate() -> float | None:
                     timeout=aiohttp.ClientTimeout(total=5),
                 )
                 data = await resp.json()
-            raw = data["tether"]["eur"]
-            return round(1 / raw, 4)
+            return round(1 / data["tether"]["eur"], 4)
         except Exception:
             return None
 
 
-def fmt_amount(value) -> str:
-    value = round(float(value), 2)
-    text = f"{value:.2f}".rstrip("0").rstrip(".")
-    return text or "0"
-
-
-async def cryptobot_create_invoice(amount_eur: float, usdt_amount: float, order_id: int) -> dict | None:
-    """
-    Создать Invoice в CryptoBot на сумму usdt_amount USDT (Polygon).
-    Возвращает {"invoice_id": ..., "pay_url": ...} или None при ошибке.
-    """
-    payload = {
-        "asset": "USDT",
-        "amount": str(round(usdt_amount, 2)),
-        "description": f"Order #{order_id} | {amount_eur}€",
-        "payload": str(order_id),
-        "paid_btn_name": "callback",
-        "paid_btn_url": "https://t.me/BIZZ_shop_bot",
-        "allow_comments": False,
-        "allow_anonymous": True,
-        "network": "polygon",
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            resp = await session.post(
-                f"{CRYPTOBOT_BASE}/createInvoice",
-                json=payload,
-                headers=CRYPTOBOT_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
-            data = await resp.json()
-        if not data.get("ok"):
-            logging.error(f"CryptoBot createInvoice error: {data}")
-            return None
-        result = data["result"]
-        return {"invoice_id": result["invoice_id"], "pay_url": result["pay_url"]}
-    except Exception as e:
-        logging.error(f"CryptoBot createInvoice exception: {e}")
-        return None
-
-
-async def cryptobot_get_invoice(invoice_id: int) -> dict | None:
-    """Получить Invoice по ID для проверки статуса."""
+async def _fetch_eur_uah() -> float | None:
+    """Получить актуальный курс EUR→UAH через exchangerate-api (fallback: НБУ)."""
     try:
         async with aiohttp.ClientSession() as session:
             resp = await session.get(
-                f"{CRYPTOBOT_BASE}/getInvoices",
-                params={"invoice_ids": str(invoice_id)},
-                headers=CRYPTOBOT_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=10),
+                "https://api.exchangerate-api.com/v4/latest/EUR",
+                timeout=aiohttp.ClientTimeout(total=5),
             )
             data = await resp.json()
-        if not data.get("ok"):
+        return round(float(data["rates"]["UAH"]), 2)
+    except Exception:
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=EUR&json",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                )
+                data = await resp.json()
+            return round(float(data[0]["rate"]), 2)
+        except Exception:
             return None
-        items = data["result"].get("items", [])
-        return items[0] if items else None
-    except Exception as e:
-        logging.error(f"CryptoBot getInvoice exception: {e}")
-        return None
+
+
+async def get_user_rate(uid: int, currency: str) -> float | None:
+    """
+    Возвращает зафиксированный курс для пользователя (TTL 30 мин).
+    currency: "usdt" | "uah"
+    При первом вызове или после истечения TTL — запрашивает свежий курс.
+    """
+    now = datetime.utcnow().timestamp()
+    user_cache = _rate_cache.get(uid, {})
+    cached = user_cache.get(currency)
+    if cached:
+        rate, ts = cached
+        if now - ts < _RATE_TTL:
+            return rate
+    # Получаем свежий курс
+    if currency == "usdt":
+        rate = await _fetch_eur_usdt()
+    else:
+        rate = await _fetch_eur_uah()
+    if rate:
+        if uid not in _rate_cache:
+            _rate_cache[uid] = {}
+        _rate_cache[uid][currency] = (rate, now)
+    return rate
+
+
+def fmt_amount(value) -> str:
+    """Убирает лишние нули: 15.20 -> '15.2', 15.00 -> '15'."""
+    value = round(float(value), 2)
+    text = f"{value:.2f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 async def is_streak_frozen() -> bool:
@@ -3786,8 +3777,8 @@ async def delivery_confirmed_pay(call):
         )
 
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(await t(uid, "usdt"), callback_data="usdt"))
-    kb.add(InlineKeyboardButton(await t(uid, "test_payment_btn"), callback_data="test_delivery_pay"))
+    kb.add(InlineKeyboardButton(await t(uid, "pay_usdt_btn"), callback_data="pay_usdt_delivery"))
+    kb.add(InlineKeyboardButton(await t(uid, "pay_card_btn"), callback_data="pay_card_delivery"))
     kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
 
     await render(call, await t(uid, "pay"), kb)
@@ -3853,16 +3844,10 @@ async def pay(call):
             await show_delivery_confirm(call, uid, delivery_data, from_pay=True)
             return
 
-    # Обычный магазин — полный список способов оплаты
+    # Самовывоз — только наличные
     kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"),
-        InlineKeyboardButton(await t(uid, "usdt"), callback_data="usdt"),
-    )
-    kb.add(
-        InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart")
-    )
-
+    kb.add(InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
     await render(call, await t(uid, "pay"), kb)
 
 @dp.callback_query_handler(lambda c: c.data == "cash")
@@ -3905,23 +3890,7 @@ async def _build_delivery_admin_block(uid: int) -> str:
     )
 
 
-@dp.callback_query_handler(lambda c: c.data == "test_delivery_pay")
-async def test_delivery_pay(call):
-    uid = call.from_user.id
-    username = call.from_user.username or str(uid)
 
-    delivery_block = await _build_delivery_admin_block(uid)
-
-    for admin in ADMIN_IDS:
-        try:
-            await bot.send_message(
-                admin,
-                f"🧪 ТЕСТ ДОСТАВКИ\nUser: @{username}{delivery_block}"
-            )
-        except Exception:
-            pass
-
-    await call.answer(await t(uid, "test_payment_confirm"), show_alert=True)
 
 
 @dp.callback_query_handler(lambda c: c.data == "confirm_cash")
@@ -3993,136 +3962,62 @@ async def confirm_cash(call):
                 UPDATE orders SET admin_message_ids=$1 WHERE id=$2
             """, ",".join(msg_ids), order_id)
 
-@dp.callback_query_handler(lambda c: c.data == "usdt")
-async def cryptobot_pay(call):
-    if not await check_not_banned(call):
-        return
+# ========== НОВЫЕ СПОСОБЫ ОПЛАТЫ (DELIVERY) ==========
 
-    uid = call.from_user.id
+USDT_WALLET  = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
+CARD_EUR     = "4400005544191544"
+CARD_UAH     = "4400005545864297"
 
+
+async def _get_cart_totals(uid: int):
+    """Вспомогательная: возвращает (cart_items, eur_total, discount, items_str, text_admin) или None если корзина пуста."""
     async with pool.acquire() as conn:
         cart_items = await conn.fetch(
             "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
         )
-
     if not cart_items:
-        await render(call, await t(uid, "empty_cart"))
-        return
-
+        return None
     total_qty = sum(r["quantity"] for r in cart_items)
     eur_total, discount = await calculate_final_price(uid, total_qty)
-
-    rate = await get_eur_usdt_rate()
-    if not rate:
-        await call.answer(await t(uid, "rate_unavailable"), show_alert=True)
-        return
-
-    usdt_amount = round(eur_total * rate, 2)
-
     async with pool.acquire() as conn:
-        text_admin = "ЗАКАЗ:\n"
         items_str_parts = []
+        text_admin = "ЗАКАЗ:\n"
         for r in cart_items:
-            product = await conn.fetchrow(
-                "SELECT name_ru FROM products WHERE id=$1", r["product_id"]
-            )
+            product = await conn.fetchrow("SELECT name_ru FROM products WHERE id=$1", r["product_id"])
             text_admin += f"{product['name_ru']} x{r['quantity']}\n"
             items_str_parts.append(f"{r['product_id']}:{r['quantity']}")
-        items_str = ",".join(items_str_parts)
+    return cart_items, eur_total, discount, ",".join(items_str_parts), text_admin
 
+
+async def _create_pending_order(uid: int, items_str: str, eur_total: float, discount: float, payment: str) -> int:
+    """Создаёт заказ со статусом pending и очищает корзину."""
+    async with pool.acquire() as conn:
         order_id = await conn.fetchval("""
             INSERT INTO orders (user_id, items, total, payment, discount, status)
-            VALUES ($1, $2, $3, 'cryptobot', $4, 'cryptobot_pending')
+            VALUES ($1, $2, $3, $4, $5, 'pending')
             RETURNING id
-        """, uid, items_str, eur_total, discount)
-
+        """, uid, items_str, eur_total, payment, discount)
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
-
-    result = await cryptobot_create_invoice(eur_total, usdt_amount, order_id)
-
-    if not result:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE orders SET status='cancelled' WHERE id=$1", order_id
-            )
-        await render(call, await t(uid, "cryptobot_error"))
-        return
-
-    invoice_id = result["invoice_id"]
-    pay_url = result["pay_url"]
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE orders SET cryptobot_invoice_id=$1 WHERE id=$2",
-            invoice_id, order_id
-        )
-
-    text = (await t(uid, "cryptobot_payment_screen")).format(
-        eur=fmt_amount(eur_total),
-        rate=fmt_amount(rate),
-        usdt=fmt_amount(usdt_amount),
-    )
-
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(await t(uid, "cryptobot_pay_btn"), url=pay_url))
-    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
-
-    await render(call, text, kb)
+    return order_id
 
 
-async def _finalize_cryptobot_order(order_id: int, uid: int, order):
-    """
-    Финализация CryptoBot заказа. Идемпотентна через UPDATE WHERE status='cryptobot_pending'.
-    """
-    async with pool.acquire() as conn:
-        updated = await conn.fetchval("""
-            UPDATE orders SET status='pending'
-            WHERE id=$1 AND status='cryptobot_pending'
-            RETURNING id
-        """, order_id)
-
-    if not updated:
-        return
-
-    async with pool.acquire() as conn:
-        username = await conn.fetchval(
-            "SELECT username FROM users WHERE user_id=$1", uid
-        ) or "нет username"
-
-    try:
-        await bot.send_message(uid, await t(uid, "cryptobot_success"))
-    except Exception:
-        pass
-
-    async with pool.acquire() as conn:
-        items_str = order["items"]
-        text_admin = "ЗАКАЗ (оплачен через CryptoBot ✅):\n"
-        for part in items_str.split(","):
-            pid, qty = part.split(":")
-            product = await conn.fetchrow(
-                "SELECT name_ru FROM products WHERE id=$1", int(pid)
-            )
-            if product:
-                text_admin += f"{product['name_ru']} x{qty}\n"
-
+async def _send_order_to_admins(order_id: int, uid: int, username: str,
+                                 text_admin: str, payment_line: str) -> None:
+    """Отправляет заказ всем администраторам и сохраняет message_ids."""
     delivery_block = await _build_delivery_admin_block(uid)
-
     order_text = (
         f"{text_admin}\n"
         f"ID: {order_id}\n"
         f"User: @{username}\n"
-        f"Оплата: CryptoBot ✅ (уже оплачено)\n"
-        f"ИТОГО: {order['total']}€"
+        f"{payment_line}"
         f"{delivery_block}"
     )
-
     kb = InlineKeyboardMarkup()
     kb.add(
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
-        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
+        InlineKeyboardButton("❌ Отменить",    callback_data=f"admin_cancel_{order_id}")
     )
-
     msg_ids = []
     for admin in ADMIN_IDS:
         try:
@@ -4130,13 +4025,192 @@ async def _finalize_cryptobot_order(order_id: int, uid: int, order):
             msg_ids.append(f"{admin}:{sent.message_id}")
         except Exception:
             pass
-
     if msg_ids:
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE orders SET admin_message_ids=$1 WHERE id=$2",
                 ",".join(msg_ids), order_id
             )
+
+
+# --- USDT ---
+
+@dp.callback_query_handler(lambda c: c.data == "pay_usdt_delivery")
+async def pay_usdt_delivery(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    result = await _get_cart_totals(uid)
+    if not result:
+        await render(call, await t(uid, "empty_cart"))
+        return
+    _, eur_total, _, _, _ = result
+
+    rate = await get_user_rate(uid, "usdt")
+    if not rate:
+        await call.answer(await t(uid, "rate_unavailable"), show_alert=True)
+        return
+
+    usdt_amount = round(eur_total * rate, 2)
+    text = (await t(uid, "pay_usdt_screen")).format(
+        eur=fmt_amount(eur_total),
+        rate=fmt_amount(rate),
+        usdt=fmt_amount(usdt_amount),
+        wallet=USDT_WALLET,
+    )
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "pay_i_paid_btn"), callback_data=f"paid_usdt_{fmt_amount(eur_total)}_{fmt_amount(usdt_amount)}_{fmt_amount(rate)}"))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
+    await render(call, text, kb, parse_mode="Markdown")
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("paid_usdt_"))
+async def paid_usdt(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    username = call.from_user.username or str(uid)
+    # Формат: paid_usdt_{eur}_{usdt}_{rate}
+    parts = call.data.split("_")
+    eur_str, usdt_str, rate_str = parts[2], parts[3], parts[4]
+
+    result = await _get_cart_totals(uid)
+    if not result:
+        await render(call, await t(uid, "empty_cart"))
+        return
+    _, eur_total, discount, items_str, text_admin = result
+
+    order_id = await _create_pending_order(uid, items_str, eur_total, discount, "usdt_trc20")
+    payment_line = (
+        f"Оплата: USDT TRC20 (ожидает проверки)\n"
+        f"Сумма EUR: {eur_str}€\n"
+        f"Курс: 1 EUR = {rate_str} USDT\n"
+        f"К оплате: {usdt_str} USDT\n"
+        f"Кошелёк: {USDT_WALLET}\n"
+        f"ИТОГО: {eur_str}€"
+    )
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
+    await render(call, await t(uid, "pay_pending_user"))
+
+
+# --- КАРТА: выбор валюты ---
+
+@dp.callback_query_handler(lambda c: c.data == "pay_card_delivery")
+async def pay_card_delivery(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "pay_card_uah_btn"), callback_data="pay_card_uah"))
+    kb.add(InlineKeyboardButton(await t(uid, "pay_card_eur_btn"), callback_data="pay_card_eur"))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
+    await render(call, await t(uid, "pay_currency_title"), kb)
+
+
+# --- КАРТА EUR ---
+
+@dp.callback_query_handler(lambda c: c.data == "pay_card_eur")
+async def pay_card_eur(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    result = await _get_cart_totals(uid)
+    if not result:
+        await render(call, await t(uid, "empty_cart"))
+        return
+    _, eur_total, _, _, _ = result
+
+    text = (await t(uid, "pay_card_eur_screen")).format(
+        eur=fmt_amount(eur_total),
+        card=CARD_EUR,
+    )
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "pay_i_paid_btn"), callback_data=f"paid_card_eur_{fmt_amount(eur_total)}"))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
+    await render(call, text, kb, parse_mode="Markdown")
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("paid_card_eur_"))
+async def paid_card_eur(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    username = call.from_user.username or str(uid)
+    eur_str = call.data.split("paid_card_eur_")[1]
+
+    result = await _get_cart_totals(uid)
+    if not result:
+        await render(call, await t(uid, "empty_cart"))
+        return
+    _, eur_total, discount, items_str, text_admin = result
+
+    order_id = await _create_pending_order(uid, items_str, eur_total, discount, "card_eur")
+    payment_line = (
+        f"Оплата: Банковская карта EUR (ожидает проверки)\n"
+        f"Карта: {CARD_EUR}\n"
+        f"ИТОГО: {eur_str}€"
+    )
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
+    await render(call, await t(uid, "pay_pending_user"))
+
+
+# --- КАРТА UAH ---
+
+@dp.callback_query_handler(lambda c: c.data == "pay_card_uah")
+async def pay_card_uah(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    result = await _get_cart_totals(uid)
+    if not result:
+        await render(call, await t(uid, "empty_cart"))
+        return
+    _, eur_total, _, _, _ = result
+
+    rate = await get_user_rate(uid, "uah")
+    if not rate:
+        await call.answer(await t(uid, "rate_unavailable"), show_alert=True)
+        return
+
+    uah_amount = round(eur_total * rate, 2)
+    text = (await t(uid, "pay_card_uah_screen")).format(
+        eur=fmt_amount(eur_total),
+        rate=fmt_amount(rate),
+        uah=fmt_amount(uah_amount),
+        card=CARD_UAH,
+    )
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "pay_i_paid_btn"), callback_data=f"paid_card_uah_{fmt_amount(eur_total)}_{fmt_amount(uah_amount)}_{fmt_amount(rate)}"))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
+    await render(call, text, kb, parse_mode="Markdown")
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("paid_card_uah_"))
+async def paid_card_uah(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    username = call.from_user.username or str(uid)
+    parts = call.data.split("_")
+    eur_str, uah_str, rate_str = parts[3], parts[4], parts[5]
+
+    result = await _get_cart_totals(uid)
+    if not result:
+        await render(call, await t(uid, "empty_cart"))
+        return
+    _, eur_total, discount, items_str, text_admin = result
+
+    order_id = await _create_pending_order(uid, items_str, eur_total, discount, "card_uah")
+    payment_line = (
+        f"Оплата: Банковская карта UAH (ожидает проверки)\n"
+        f"Карта: {CARD_UAH}\n"
+        f"Сумма EUR: {eur_str}€\n"
+        f"Курс: 1 EUR = {rate_str} UAH\n"
+        f"К оплате: {uah_str} UAH\n"
+        f"ИТОГО: {eur_str}€"
+    )
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
+    await render(call, await t(uid, "pay_pending_user"))
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("admin_confirm_"))
@@ -4547,55 +4621,12 @@ async def unstock_cmd(message: types.Message):
 
 # ========== ЗАПУСК ==========
 
-async def cryptobot_webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    """
-    CryptoBot шлёт webhook при оплате Invoice.
-    Событие invoice_paid — Invoice оплачен.
-    """
-    try:
-        data = await request.json()
-    except Exception:
-        return aiohttp.web.Response(status=400)
-
-    if data.get("update_type") == "invoice_paid":
-        invoice = data.get("payload", {})
-        invoice_id = invoice.get("invoice_id")
-        payload_str = invoice.get("payload", "")  # наш order_id
-
-        if invoice_id and payload_str:
-            try:
-                order_id = int(payload_str)
-            except ValueError:
-                return aiohttp.web.Response(text="ok")
-
-            async with pool.acquire() as conn:
-                order = await conn.fetchrow("""
-                    SELECT id, user_id, status, items, total, discount
-                    FROM orders WHERE id=$1 AND cryptobot_invoice_id=$2
-                """, order_id, invoice_id)
-
-            if order and order["status"] == "cryptobot_pending":
-                await _finalize_cryptobot_order(order_id, order["user_id"], order)
-
-    return aiohttp.web.Response(text="ok")
-
-
 async def on_startup(dp):
     await init_db()
 
 
 async def run():
     await on_startup(dp)
-
-    app = aiohttp.web.Application()
-    app.router.add_post(CRYPTOBOT_WEBHOOK_PATH, cryptobot_webhook_handler)
-
-    runner = aiohttp.web.AppRunner(app)
-    await runner.setup()
-    site = aiohttp.web.TCPSite(runner, "0.0.0.0", CRYPTOBOT_WEBHOOK_PORT)
-    await site.start()
-    logging.info(f"CryptoBot webhook listening on :{CRYPTOBOT_WEBHOOK_PORT}{CRYPTOBOT_WEBHOOK_PATH}")
-
     await dp.start_polling(reset_webhook=True)
 
 
