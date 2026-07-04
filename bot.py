@@ -2036,8 +2036,8 @@ async def repeat_order(call):
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         # Восстанавливаем режим из оригинального заказа
         await conn.execute(
-            "UPDATE users SET delivery_mode=$1 WHERE user_id=$2",
-            1 if is_delivery else 0, uid
+            "UPDATE users SET delivery_mode=$1, cart_mode=$2 WHERE user_id=$3",
+            1 if is_delivery else 0, cart_mode, uid
         )
 
         for item in items_str.split(","):
@@ -3757,11 +3757,16 @@ async def delivery_got_tracking(call: types.CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
-    # Используем контекст запуска: если форма открылась из оплаты — ведём к оплате,
-    # если из профиля — показываем окно проверки адреса через профиль,
-    # если из gift-потока — возвращаем в gift-магазин
     from_pay  = data.get("from_pay", False)
     gift_flow = data.get("gift_flow", False)
+
+    # Если форма заполнялась не из потока оплаты — восстанавливаем главную клавиатуру.
+    # При from_pay форма была запущена поверх inline-сообщения и клавиатура уже на месте.
+    if not from_pay and not gift_flow:
+        lang = await get_lang(uid)
+        mk = main_menu(lang)
+        await bot.send_message(uid, "✅", reply_markup=mk)
+
     await show_delivery_confirm(call, uid, delivery_data, from_pay=from_pay, gift_flow=gift_flow)
 
 
