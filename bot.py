@@ -25,6 +25,7 @@ def is_admin(uid):
 
 logging.basicConfig(level=logging.INFO)
 
+
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
@@ -1641,7 +1642,7 @@ def get_rank(total_items):
 
     return current
 
-async def render(target, text, kb=None, photo=None):
+async def render(target, text, kb=None, photo=None, parse_mode="HTML"):
     try:
         if isinstance(target, types.Message):
             if photo:
@@ -1649,16 +1650,16 @@ async def render(target, text, kb=None, photo=None):
                     photo,
                     caption=text,
                     reply_markup=kb,
-                    parse_mode="HTML"
+                    parse_mode=parse_mode
                 )
             else:
                 await target.answer(
                     text,
                     reply_markup=kb,
-                    parse_mode="HTML"
+                    parse_mode=parse_mode
                 )
             return
-            
+
         msg = target.message
 
         if photo:
@@ -1667,13 +1668,13 @@ async def render(target, text, kb=None, photo=None):
                 photo,
                 caption=text,
                 reply_markup=kb,
-                parse_mode="HTML"
+                parse_mode=parse_mode
             )
         else:
             await msg.edit_text(
                 text,
                 reply_markup=kb,
-                parse_mode="HTML"
+                parse_mode=parse_mode
             )
 
     except Exception:
@@ -1687,13 +1688,13 @@ async def render(target, text, kb=None, photo=None):
                 photo,
                 caption=text,
                 reply_markup=kb,
-                parse_mode="HTML"
+                parse_mode=parse_mode
             )
         else:
             await target.message.answer(
                 text,
                 reply_markup=kb,
-                parse_mode="HTML"
+                parse_mode=parse_mode
             )
 # ========== МЕНЮ ==========
 
