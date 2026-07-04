@@ -2021,23 +2021,32 @@ async def repeat_order(call):
     oid = int(call.data.split("_")[1])
 
     async with pool.acquire() as conn:
-        items = await conn.fetchval(
-            "SELECT items FROM orders WHERE id=$1",
-            oid
+        order = await conn.fetchrow(
+            "SELECT items, is_delivery FROM orders WHERE id=$1", oid
         )
 
+    if not order:
+        return
+
+    items_str = order["items"]
+    is_delivery = bool(order["is_delivery"])
+    cart_mode = "delivery" if is_delivery else "pickup"
+
+    async with pool.acquire() as conn:
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
-        await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
+        # Восстанавливаем режим из оригинального заказа
+        await conn.execute(
+            "UPDATE users SET delivery_mode=$1 WHERE user_id=$2",
+            1 if is_delivery else 0, uid
+        )
 
-        for item in items.split(","):
+        for item in items_str.split(","):
             pid, qty = item.split(":")
-            pid = int(pid)
-            qty = int(qty)
-
+            pid, qty = int(pid), int(qty)
             await conn.execute("""
-                INSERT INTO cart (user_id, product_id, quantity)
-                VALUES ($1,$2,$3)
-            """, uid, pid, qty)
+                INSERT INTO cart (user_id, product_id, quantity, cart_mode)
+                VALUES ($1, $2, $3, $4)
+            """, uid, pid, qty, cart_mode)
 
     await render_cart(call, uid)
 
@@ -3595,7 +3604,8 @@ async def start_delivery_form(target, uid, from_pay: bool = False):
 
 
 async def show_delivery_confirm(target, uid, data: dict, from_pay: bool = False, gift_flow: bool = False):
-    """Показывает блок данных доставки с кнопками Подтвердить / Заново."""
+    """Показывает блок данных доставки с кнопками Подтвердить / Заново.
+    Редактирует существующее сообщение target вместо отправки новых."""
     text = await format_delivery_block(uid, data)
 
     kb = InlineKeyboardMarkup()
@@ -3608,17 +3618,21 @@ async def show_delivery_confirm(target, uid, data: dict, from_pay: bool = False,
     else:
         confirm_cb = "delivery_confirmed_save"
         refill_cb  = "delivery_refill_save"
+
     kb.add(
         InlineKeyboardButton(await t(uid, "delivery_confirm_btn"), callback_data=confirm_cb),
         InlineKeyboardButton(await t(uid, "delivery_refill_btn"),  callback_data=refill_cb),
     )
 
-    # Восстанавливаем главную клавиатуру отдельным сообщением,
-    # затем единственное сообщение с данными доставки + inline-кнопками
-    lang = await get_lang(uid)
-    mk = main_menu(lang)
-    await bot.send_message(uid, "✅", reply_markup=mk)
-    await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
+    # Редактируем существующее сообщение (если target — callback) или отправляем новое
+    try:
+        if isinstance(target, types.CallbackQuery):
+            await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        else:
+            await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        # Если edit_text не сработал (сообщение удалено или не изменилось) — шлём новое
+        await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
 
 
 @dp.message_handler(state=DeliveryForm.name)
@@ -3777,7 +3791,11 @@ async def delivery_confirmed_pay(call):
     kb.add(InlineKeyboardButton(await t(uid, "pay_card_btn"), callback_data="pay_card_delivery"))
     kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
 
-    await render(call, await t(uid, "pay"), kb)
+    # Редактируем то же сообщение с адресом → экран выбора оплаты
+    try:
+        await call.message.edit_text(await t(uid, "pay"), reply_markup=kb)
+    except Exception:
+        await render(call, await t(uid, "pay"), kb)
 
 
 @dp.callback_query_handler(lambda c: c.data == "delivery_confirmed_save")
@@ -3829,20 +3847,19 @@ async def pay(call):
     is_delivery = (cart_mode == "delivery")
 
     if is_delivery:
-        # Для доставки сначала собираем/подтверждаем данные доставки
         delivery_data = await get_delivery_data(uid)
         if not delivery_data:
-            # Первый раз — запускаем форму
             await start_delivery_form(call, uid, from_pay=True)
             return
         else:
-            # Данные уже есть — показываем их и просим подтвердить
             await show_delivery_confirm(call, uid, delivery_data, from_pay=True)
             return
 
-    # Самовывоз — только наличные
+    # Самовывоз — наличные + USDT + карта
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"))
+    kb.add(InlineKeyboardButton(await t(uid, "pay_usdt_btn"), callback_data="pay_usdt_delivery"))
+    kb.add(InlineKeyboardButton(await t(uid, "pay_card_btn"), callback_data="pay_card_delivery"))
     kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
     await render(call, await t(uid, "pay"), kb)
 
