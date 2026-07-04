@@ -29,7 +29,7 @@ def is_admin(uid):
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=API_TOKEN)
+
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
