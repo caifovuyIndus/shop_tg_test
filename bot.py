@@ -3524,86 +3524,21 @@ async def _build_delivery_admin_block(uid: int) -> str:
 
 @dp.callback_query_handler(lambda c: c.data == "test_delivery_pay")
 async def test_delivery_pay(call):
-    """Тестовая оплата доставки — только для проверки режима доставки."""
-    if not await check_not_banned(call):
-        return
-
     uid = call.from_user.id
-    username = call.from_user.username or "нет username"
-
-    async with pool.acquire() as conn:
-        cart_items = await conn.fetch(
-            "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
-        )
-
-    if not cart_items:
-        await render(call, await t(uid, "empty_cart"))
-        return
-
-    items_str = ",".join([f"{r['product_id']}:{r['quantity']}" for r in cart_items])
-    total_qty = sum(r["quantity"] for r in cart_items)
-    total, discount = await calculate_final_price(uid, total_qty)
+    username = call.from_user.username or str(uid)
 
     delivery_block = await _build_delivery_admin_block(uid)
 
-    async with pool.acquire() as conn:
-        text_admin = "ЗАКАЗ (тест доставки):\n"
-        for r in cart_items:
-            product = await conn.fetchrow(
-                "SELECT name_ru FROM products WHERE id=$1", r["product_id"]
-            )
-            text_admin += f"{product['name_ru']} x{r['quantity']}\n"
-
-        # Снимаем снапшот данных доставки прямо в заказ
-        drow = await conn.fetchrow("""
-            SELECT delivery_name, delivery_phone, delivery_address, delivery_tracking
-            FROM users WHERE user_id=$1
-        """, uid)
-
-        order_id = await conn.fetchval("""
-            INSERT INTO orders
-                (user_id, items, total, payment, discount,
-                 is_delivery, delivery_name, delivery_phone,
-                 delivery_address, delivery_tracking)
-            VALUES ($1,$2,$3,'test_delivery',$4,true,$5,$6,$7,$8)
-            RETURNING id
-        """, uid, items_str, total, discount,
-             drow["delivery_name"], drow["delivery_phone"],
-             drow["delivery_address"], drow["delivery_tracking"])
-
-        await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
-        await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
-
-    await render(call, await t(uid, "test_payment_confirm"))
-
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
-        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
-    )
-
-    order_text = (
-        f"{text_admin}\n"
-        f"ID: {order_id}\nUser: @{username}\n"
-        f"Оплата: 🧪 Тестовая (доставка) ✅ (уже оплачено)\n"
-        f"ИТОГО: {total}€"
-        f"{delivery_block}"
-    )
-
-    msg_ids = []
     for admin in ADMIN_IDS:
         try:
-            sent = await bot.send_message(admin, order_text, reply_markup=kb)
-            msg_ids.append(f"{admin}:{sent.message_id}")
+            await bot.send_message(
+                admin,
+                f"🧪 ТЕСТ ДОСТАВКИ\nUser: @{username}{delivery_block}"
+            )
         except Exception:
             pass
 
-    if msg_ids:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE orders SET admin_message_ids=$1 WHERE id=$2",
-                ",".join(msg_ids), order_id
-            )
+    await call.answer(await t(uid, "test_payment_confirm"), show_alert=True)
 
 
 @dp.callback_query_handler(lambda c: c.data == "confirm_cash")
