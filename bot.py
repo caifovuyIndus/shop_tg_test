@@ -3947,8 +3947,8 @@ async def confirm_cash(call):
             text_admin += f"{product['name_ru']} x{r['quantity']}\n"
 
         order_id = await conn.fetchval("""
-            INSERT INTO orders (user_id, items, total, payment, discount)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO orders (user_id, items, total, payment, discount, is_delivery)
+            VALUES ($1, $2, $3, $4, $5, false)
             RETURNING id
         """, uid, items_str, total, "cash", discount)
 
@@ -4009,12 +4009,15 @@ async def _get_cart_totals(uid: int):
 
 async def _create_pending_order(uid: int, items_str: str, eur_total: float, discount: float, payment: str) -> int:
     """Создаёт заказ со статусом pending и очищает корзину."""
+    cart_mode = await get_cart_mode(uid)
+    is_delivery = (cart_mode == "delivery")
+
     async with pool.acquire() as conn:
         order_id = await conn.fetchval("""
-            INSERT INTO orders (user_id, items, total, payment, discount, status)
-            VALUES ($1, $2, $3, $4, $5, 'pending')
+            INSERT INTO orders (user_id, items, total, payment, discount, status, is_delivery)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6)
             RETURNING id
-        """, uid, items_str, eur_total, payment, discount)
+        """, uid, items_str, eur_total, payment, discount, is_delivery)
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
     return order_id
