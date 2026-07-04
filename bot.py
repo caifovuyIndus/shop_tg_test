@@ -9,8 +9,11 @@ from datetime import date, timedelta, datetime
 from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
 from aiogram.utils import executor
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
 # ========== КОНФИГ ==========
 
@@ -26,7 +29,8 @@ def is_admin(uid):
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 
 _bot_username = None
 
@@ -226,6 +230,29 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
+
+        # ================= ДОСТАВКА =================
+        # Данные доставки пользователя (заполняются один раз)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS delivery_info (
+            user_id BIGINT PRIMARY KEY,
+            full_name TEXT,
+            phone TEXT,
+            bundesland TEXT,
+            stadt TEXT,
+            strasse TEXT,
+            with_tracking BOOLEAN DEFAULT true,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        # Режим корзины: 'pickup' (самовывоз) или 'delivery' (доставка).
+        # Отдельная колонка cart_mode хранится на уровне пользователя.
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS cart_mode TEXT DEFAULT 'pickup'
+        """)
         
         count = await conn.fetchval("SELECT COUNT(*) FROM products WHERE category='elfliq'")
 
@@ -262,6 +289,51 @@ async def init_db():
                     image   = CASE WHEN EXCLUDED.image <> '' THEN EXCLUDED.image
                                    ELSE products.image END
             """, *row)
+
+# ========== FSM ДОСТАВКА ==========
+
+class DeliveryForm(StatesGroup):
+    name  = State()
+    phone = State()
+    address = State()
+    tracking = State()
+
+# ========== ХЕЛПЕРЫ РЕЖИМА КОРЗИНЫ ==========
+
+async def get_cart_mode(uid: int) -> str:
+    """Возвращает 'pickup' или 'delivery'."""
+    async with pool.acquire() as conn:
+        mode = await conn.fetchval(
+            "SELECT cart_mode FROM users WHERE user_id=$1", uid
+        )
+    return mode or "pickup"
+
+async def set_cart_mode(uid: int, mode: str):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET cart_mode=$1 WHERE user_id=$2", mode, uid
+        )
+
+async def get_delivery_info(uid: int):
+    """Возвращает строку с данными доставки или None."""
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM delivery_info WHERE user_id=$1", uid
+        )
+
+def format_delivery_info(info, uid_lang_texts, tracking_label) -> str:
+    """Форматирует данные доставки в текст-подтверждение."""
+    tracking_mark = "\u2705" if info["with_tracking"] else "\u274c"
+    parts = [
+        uid_lang_texts["delivery_name_label"] + " " + info["full_name"],
+        uid_lang_texts["delivery_phone_label"] + " " + info["phone"],
+        uid_lang_texts["delivery_address_label"],
+        "Bundesland: " + info["bundesland"],
+        "Stadt: " + info["stadt"],
+        "Straße: " + info["strasse"],
+        tracking_label + " " + tracking_mark,
+    ]
+    return "\n".join(parts)
 
 # ========== ТОВАРЫ ==========
 
@@ -602,6 +674,32 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено колёс: {count}",
         "stats_invited": "👥 Приглашено пользователей: {count}",
         "stats_total_spent": "💰 Всего потрачено: {value}€",
+        "delivery_mode_btn": "🚚 Доставка",
+        "pickup_mode_btn": "🏪 Самовывоз",
+        "delivery_free_hint": "📦 При заказе от 3 банок доставка бесплатная.",
+        "cart_mode_delivery": "🚚 Режим: Доставка",
+        "cart_mode_pickup": "🏪 Режим: Самовывоз",
+        "cart_mixed_warning": "❗ Нельзя смешивать товары из разных режимов. Очисти корзину, чтобы переключиться.",
+        "delivery_cash_blocked": "🚚 Для доставки оплата наличными недоступна.",
+        "delivery_enter_name": "👤 Введите имя и фамилию (как в паспорте):",
+        "delivery_enter_phone": "📞 Введите номер телефона или нажмите кнопку:",
+        "delivery_share_phone_btn": "📱 Отправить мой номер",
+        "delivery_enter_address": "📍 Введите адрес в формате:\n\nBundesland. Stadt. Straße",
+        "delivery_choose_tracking": "🚚 Выберите тип доставки:",
+        "delivery_tracking_yes": "✅ С трек-номером — 6.20€",
+        "delivery_tracking_no": "❌ Без трек-номера — 4.20€",
+        "delivery_confirm_title": "📦 Проверьте данные доставки",
+        "delivery_name_label": "Имя:",
+        "delivery_phone_label": "Телефон:",
+        "delivery_address_label": "Адрес:",
+        "delivery_tracking_label": "Трек-номер",
+        "delivery_confirm_btn": "✅ Подтвердить",
+        "delivery_refill_btn": "🔄 Заполнить заново",
+        "delivery_saved": "✅ Данные доставки сохранены.",
+        "delivery_profile_btn": "📦 Адрес доставки",
+        "delivery_profile_title": "📦 Адрес доставки",
+        "delivery_test_pay": "🧪 Тестовая оплата (DEV)",
+        "delivery_test_pay_done": "✅ Тестовый заказ оформлен. Заказ передан в обработку.",
     },
 
     "ua": {
@@ -743,6 +841,32 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено коліс: {count}",
         "stats_invited": "👥 Запрошено користувачів: {count}",
         "stats_total_spent": "💰 Всього витрачено: {value}€",
+        "delivery_mode_btn": "🚚 Доставка",
+        "pickup_mode_btn": "🏪 Самовивіз",
+        "delivery_free_hint": "📦 При замовленні від 3 банок доставка безкоштовна.",
+        "cart_mode_delivery": "🚚 Режим: Доставка",
+        "cart_mode_pickup": "🏪 Режим: Самовивіз",
+        "cart_mixed_warning": "❗ Не можна змішувати товари з різних режимів. Очисти кошик, щоб переключитися.",
+        "delivery_cash_blocked": "🚚 Для доставки оплата готівкою недоступна.",
+        "delivery_enter_name": "👤 Введіть ім'я та прізвище (як у паспорті):",
+        "delivery_enter_phone": "📞 Введіть номер телефону або натисніть кнопку:",
+        "delivery_share_phone_btn": "📱 Надіслати мій номер",
+        "delivery_enter_address": "📍 Введіть адресу у форматі:\n\nBundesland. Stadt. Straße",
+        "delivery_choose_tracking": "🚚 Оберіть тип доставки:",
+        "delivery_tracking_yes": "✅ З трек-номером — 6.20€",
+        "delivery_tracking_no": "❌ Без трек-номера — 4.20€",
+        "delivery_confirm_title": "📦 Перевірте дані доставки",
+        "delivery_name_label": "Ім'я:",
+        "delivery_phone_label": "Телефон:",
+        "delivery_address_label": "Адреса:",
+        "delivery_tracking_label": "Трек-номер",
+        "delivery_confirm_btn": "✅ Підтвердити",
+        "delivery_refill_btn": "🔄 Заповнити заново",
+        "delivery_saved": "✅ Дані доставки збережено.",
+        "delivery_profile_btn": "📦 Адреса доставки",
+        "delivery_profile_title": "📦 Адреса доставки",
+        "delivery_test_pay": "🧪 Тестова оплата (DEV)",
+        "delivery_test_pay_done": "✅ Тестове замовлення оформлено. Замовлення передано в обробку.",
     },
 
     "de": {
@@ -885,6 +1009,32 @@ TEXTS = {
         "stats_spins": "🎰 Gedrehte Räder: {count}",
         "stats_invited": "👥 Eingeladene Nutzer: {count}",
         "stats_total_spent": "💰 Insgesamt ausgegeben: {value}€",
+        "delivery_mode_btn": "🚚 Lieferung",
+        "pickup_mode_btn": "🏪 Abholung",
+        "delivery_free_hint": "📦 Ab 3 Dosen ist die Lieferung kostenlos.",
+        "cart_mode_delivery": "🚚 Modus: Lieferung",
+        "cart_mode_pickup": "🏪 Modus: Abholung",
+        "cart_mixed_warning": "❗ Produkte aus verschiedenen Modi können nicht gemischt werden. Leere den Warenkorb, um zu wechseln.",
+        "delivery_cash_blocked": "🚚 Barzahlung ist für Lieferungen nicht verfügbar.",
+        "delivery_enter_name": "👤 Vor- und Nachname eingeben (wie im Reisepass):",
+        "delivery_enter_phone": "📞 Telefonnummer eingeben oder Taste drücken:",
+        "delivery_share_phone_btn": "📱 Meine Nummer senden",
+        "delivery_enter_address": "📍 Adresse im Format eingeben:\n\nBundesland. Stadt. Straße",
+        "delivery_choose_tracking": "🚚 Versandart wählen:",
+        "delivery_tracking_yes": "✅ Mit Sendungsnummer — 6.20€",
+        "delivery_tracking_no": "❌ Ohne Sendungsnummer — 4.20€",
+        "delivery_confirm_title": "📦 Lieferdaten prüfen",
+        "delivery_name_label": "Name:",
+        "delivery_phone_label": "Telefon:",
+        "delivery_address_label": "Adresse:",
+        "delivery_tracking_label": "Sendungsnummer",
+        "delivery_confirm_btn": "✅ Bestätigen",
+        "delivery_refill_btn": "🔄 Neu ausfüllen",
+        "delivery_saved": "✅ Lieferdaten gespeichert.",
+        "delivery_profile_btn": "📦 Lieferadresse",
+        "delivery_profile_title": "📦 Lieferadresse",
+        "delivery_test_pay": "🧪 Testzahlung (DEV)",
+        "delivery_test_pay_done": "✅ Testbestellung aufgegeben. Bestellung wird bearbeitet.",
     }
 }
 
@@ -1509,8 +1659,6 @@ async def render_profile(target):
     rank = get_rank(items)
     rank_name = rank["name"][lang]
 
-    # Общая скидка — та же величина, что и на экране "Скидки"
-    # (ранг + стрик + рулетка + рефералка + любые другие активные скидки)
     total_discount = await calculate_total_discount(uid, 1)
 
     text = (
@@ -1539,6 +1687,14 @@ async def render_profile(target):
         InlineKeyboardButton(await t(uid,"favorites"), callback_data="profile_fav"),
         InlineKeyboardButton(await t(uid,"stats"), callback_data="profile_stats"),
     )
+
+    # Кнопка адреса доставки — показывается только если данные уже заполнены
+    delivery_info = await get_delivery_info(uid)
+    if delivery_info:
+        kb.add(
+            InlineKeyboardButton(await t(uid,"delivery_profile_btn"), callback_data="profile_delivery"),
+        )
+
     kb.add(
         InlineKeyboardButton(await t(uid,"to_shop"), callback_data="back_shop"),
     )
@@ -2671,7 +2827,16 @@ async def render_category_selection(target, uid, mode="shop"):
     для бесплатной банки (без цен и корзины)."""
     prefix = "shop_cat_" if mode == "shop" else "gift_cat_"
 
+    cart_mode = await get_cart_mode(uid)
+    mode_label = await t(uid, "cart_mode_delivery") if cart_mode == "delivery" else await t(uid, "cart_mode_pickup")
+    toggle_btn_label = await t(uid, "pickup_mode_btn") if cart_mode == "delivery" else await t(uid, "delivery_mode_btn")
+    toggle_callback = "set_mode_pickup" if cart_mode == "delivery" else "set_mode_delivery"
+
+    hint = await t(uid, "delivery_free_hint") if cart_mode == "delivery" else ""
     text = await t(uid, "choose_section")
+    if hint:
+        text += f"\n\n{hint}"
+    text += f"\n\n{mode_label}"
 
     kb = InlineKeyboardMarkup()
     kb.add(
@@ -2680,6 +2845,7 @@ async def render_category_selection(target, uid, mode="shop"):
     )
 
     if mode == "shop":
+        kb.add(InlineKeyboardButton(toggle_btn_label, callback_data=toggle_callback))
         kb.add(
             InlineKeyboardButton(await t(uid,"cart"), callback_data="open_cart"),
             InlineKeyboardButton(await t(uid,"profile"), callback_data="profile")
@@ -2836,8 +3002,19 @@ async def add(call):
     uid = call.from_user.id
     pid = int(call.data.split("_")[1])
 
-    async with pool.acquire() as conn:
+    # Проверка: режим корзины при первом добавлении фиксируется.
+    # Нельзя смешивать товары из разных режимов.
+    current_mode = await get_cart_mode(uid)
 
+    async with pool.acquire() as conn:
+        cart_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM cart WHERE user_id=$1", uid
+        )
+
+    # Если корзина не пустая — режим уже зафиксирован, нельзя переключить
+    # (это защита от смешивания, UI-переключение блокируется отдельно)
+
+    async with pool.acquire() as conn:
         exists = await conn.fetchrow("""
             SELECT 1 FROM cart
             WHERE user_id=$1 AND product_id=$2
@@ -2876,6 +3053,9 @@ async def render_cart(target, uid):
             ORDER BY c.position ASC
         """, uid)
 
+    cart_mode = await get_cart_mode(uid)
+    mode_label = await t(uid, "cart_mode_delivery") if cart_mode == "delivery" else await t(uid, "cart_mode_pickup")
+
     if not items:
         await render(target, await t(uid,"empty_cart"))
         return
@@ -2883,7 +3063,10 @@ async def render_cart(target, uid):
     total_qty = sum(i["quantity"] for i in items)
     final_total, discount = await calculate_final_price(uid, total_qty)
 
-    text = "🧺\n\n"
+    text = f"🧺 {mode_label}\n"
+    if cart_mode == "delivery":
+        text += await t(uid, "delivery_free_hint") + "\n"
+    text += "\n"
 
     kb = InlineKeyboardMarkup()
 
@@ -2986,20 +3169,338 @@ async def cart_minus(call):
 @dp.callback_query_handler(lambda c: c.data == "noop")
 async def noop(call):
     await call.answer()
+
+# ========== ПЕРЕКЛЮЧЕНИЕ РЕЖИМА МАГАЗИНА ==========
+
+@dp.callback_query_handler(lambda c: c.data == "set_mode_delivery")
+async def set_mode_delivery(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+
+    # Проверяем: корзина не пустая — нельзя переключить
+    async with pool.acquire() as conn:
+        cart_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM cart WHERE user_id=$1", uid
+        )
+
+    if cart_count > 0:
+        await call.answer(await t(uid, "cart_mixed_warning"), show_alert=True)
+        return
+
+    await set_cart_mode(uid, "delivery")
+    await call.answer()
+    await render_category_selection(call, uid, mode="shop")
+
+@dp.callback_query_handler(lambda c: c.data == "set_mode_pickup")
+async def set_mode_pickup(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+
+    async with pool.acquire() as conn:
+        cart_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM cart WHERE user_id=$1", uid
+        )
+
+    if cart_count > 0:
+        await call.answer(await t(uid, "cart_mixed_warning"), show_alert=True)
+        return
+
+    await set_cart_mode(uid, "pickup")
+    await call.answer()
+    await render_category_selection(call, uid, mode="shop")
+
+# ========== FSM: ЗАПОЛНЕНИЕ ДАННЫХ ДОСТАВКИ ==========
+
+async def _start_delivery_form(target, uid: int):
+    """Запускает пошаговое заполнение данных доставки."""
+    state = dp.current_state(user=uid, chat=uid)
+    await state.set_state(DeliveryForm.name)
+
+    kb = ReplyKeyboardRemove()
+    if hasattr(target, "message"):
+        await target.message.answer(await t(uid, "delivery_enter_name"), reply_markup=kb)
+    else:
+        await target.answer(await t(uid, "delivery_enter_name"), reply_markup=kb)
+
+@dp.message_handler(state=DeliveryForm.name)
+async def delivery_got_name(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    await state.update_data(full_name=message.text.strip())
+
+    phone_kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    phone_kb.add(KeyboardButton(await t(uid, "delivery_share_phone_btn"), request_contact=True))
+
+    await message.answer(await t(uid, "delivery_enter_phone"), reply_markup=phone_kb)
+    await state.set_state(DeliveryForm.phone)
+
+@dp.message_handler(state=DeliveryForm.phone, content_types=[types.ContentType.CONTACT, types.ContentType.TEXT])
+async def delivery_got_phone(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+
+    if message.contact:
+        phone = message.contact.phone_number
+    else:
+        phone = message.text.strip()
+
+    await state.update_data(phone=phone)
+
+    addr_text = await t(uid, "delivery_enter_address")
+    await message.answer(addr_text, reply_markup=ReplyKeyboardRemove())
+    await state.set_state(DeliveryForm.address)
+
+@dp.message_handler(state=DeliveryForm.address)
+async def delivery_got_address(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    raw = message.text.strip()
+
+    # Разбиваем по точке: "Bundesland. Stadt. Straße"
+    parts = [p.strip() for p in raw.split(".") if p.strip()]
+    if len(parts) < 3:
+        await message.answer(await t(uid, "delivery_enter_address"))
+        return
+
+    bundesland = parts[0]
+    stadt = parts[1]
+    strasse = ". ".join(parts[2:])  # Остаток — улица (может содержать точки)
+
+    await state.update_data(bundesland=bundesland, stadt=stadt, strasse=strasse)
+
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton(await t(uid, "delivery_tracking_yes"), callback_data="delivery_track_yes"),
+        InlineKeyboardButton(await t(uid, "delivery_tracking_no"), callback_data="delivery_track_no"),
+    )
+    await message.answer(await t(uid, "delivery_choose_tracking"), reply_markup=kb)
+    await state.set_state(DeliveryForm.tracking)
+
+@dp.callback_query_handler(lambda c: c.data in ("delivery_track_yes", "delivery_track_no"), state=DeliveryForm.tracking)
+async def delivery_got_tracking(call: types.CallbackQuery, state: FSMContext):
+    uid = call.from_user.id
+    with_tracking = call.data == "delivery_track_yes"
+    await state.update_data(with_tracking=with_tracking)
+
+    data = await state.get_data()
+    await _show_delivery_confirm(call, uid, data)
+
+async def _show_delivery_confirm(target, uid: int, data: dict):
+    lang = await get_lang(uid)
+    texts = TEXTS[lang]
+    tracking_label = texts["delivery_tracking_label"]
+    tracking_mark = "\u2705" if data.get("with_tracking") else "\u274c"
+    nl = "\n"
+    info_text = (
+        "Bundesland: " + data["bundesland"] + nl +
+        "Stadt: " + data["stadt"] + nl +
+        "Stra\u00dfe: " + data["strasse"]
+    )
+    text = (
+        texts["delivery_confirm_title"] + nl + nl +
+        texts["delivery_name_label"] + " " + data["full_name"] + nl + nl +
+        texts["delivery_phone_label"] + " " + data["phone"] + nl + nl +
+        texts["delivery_address_label"] + nl + info_text + nl + nl +
+        tracking_label + " " + tracking_mark
+    )
+
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton(texts["delivery_confirm_btn"], callback_data="delivery_confirm"),
+        InlineKeyboardButton(texts["delivery_refill_btn"], callback_data="delivery_refill"),
+    )
+
+    if hasattr(target, "message"):
+        await target.message.answer(text, reply_markup=kb)
+    else:
+        await target.answer(text, reply_markup=kb)
+
+@dp.callback_query_handler(lambda c: c.data == "delivery_confirm", state=DeliveryForm.tracking)
+async def delivery_confirm_data(call: types.CallbackQuery, state: FSMContext):
+    uid = call.from_user.id
+    data = await state.get_data()
+    await state.finish()
+
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO delivery_info (user_id, full_name, phone, bundesland, stadt, strasse, with_tracking, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) DO UPDATE SET
+                full_name=EXCLUDED.full_name,
+                phone=EXCLUDED.phone,
+                bundesland=EXCLUDED.bundesland,
+                stadt=EXCLUDED.stadt,
+                strasse=EXCLUDED.strasse,
+                with_tracking=EXCLUDED.with_tracking,
+                updated_at=CURRENT_TIMESTAMP
+        """, uid, data["full_name"], data["phone"],
+             data["bundesland"], data["stadt"], data["strasse"],
+             data.get("with_tracking", True))
+
+    await call.message.answer(await t(uid, "delivery_saved"))
+    # Показываем экран оплаты
+    await _show_payment_screen(call, uid)
+
+@dp.callback_query_handler(lambda c: c.data == "delivery_refill", state=DeliveryForm.tracking)
+async def delivery_refill(call: types.CallbackQuery, state: FSMContext):
+    uid = call.from_user.id
+    await state.finish()
+    await _start_delivery_form(call, uid)
+
+async def _show_payment_screen(target, uid: int):
+    """Показывает экран выбора оплаты (вызывается после сохранения данных доставки)."""
+    cart_mode = await get_cart_mode(uid)
+    kb = InlineKeyboardMarkup()
+    if cart_mode != "delivery":
+        kb.add(InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"))
+    kb.add(InlineKeyboardButton(await t(uid, "usdt"), callback_data="usdt"))
+    kb.add(InlineKeyboardButton(await t(uid, "delivery_test_pay"), callback_data="delivery_test_pay"))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
+
+    if hasattr(target, "message"):
+        await target.message.answer(await t(uid, "pay"), reply_markup=kb)
+    else:
+        await target.answer(await t(uid, "pay"), reply_markup=kb)
+
+# ========== ТЕСТОВАЯ ОПЛАТА ДОСТАВКИ ==========
+
+@dp.callback_query_handler(lambda c: c.data == "delivery_test_pay")
+async def delivery_test_pay(call: types.CallbackQuery):
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+    username = call.from_user.username or "нет username"
+    cart_mode = await get_cart_mode(uid)
+
+    async with pool.acquire() as conn:
+        cart_items = await conn.fetch(
+            "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
+        )
+
+    if not cart_items:
+        await render(call, await t(uid, "empty_cart"))
+        return
+
+    total_qty = sum(r["quantity"] for r in cart_items)
+    total, discount = await calculate_final_price(uid, total_qty)
+
+    delivery_info = await get_delivery_info(uid) if cart_mode == "delivery" else None
+
+    async with pool.acquire() as conn:
+        items_str = ",".join([f"{r['product_id']}:{r['quantity']}" for r in cart_items])
+        text_admin = "ЗАКАЗ:\n"
+        for r in cart_items:
+            product = await conn.fetchrow("SELECT name_ru FROM products WHERE id=$1", r["product_id"])
+            text_admin += product["name_ru"] + " x" + str(r["quantity"]) + "\n"
+
+        order_id = await conn.fetchval("""
+            INSERT INTO orders (user_id, items, total, payment, discount)
+            VALUES ($1,$2,$3,$4,$5)
+            RETURNING id
+        """, uid, items_str, total, "test_delivery", discount)
+
+        await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
+
+    await render(call, await t(uid, "delivery_test_pay_done"))
+
+    # Сообщение админам
+    delivery_block = ""
+    if delivery_info:
+        tracking_mark = "✅" if delivery_info["with_tracking"] else "❌"
+        delivery_block = (
+            f"\n\n📦 ДОСТАВКА:\n"
+            f"Имя: {delivery_info['full_name']}\n"
+            f"Телефон: {delivery_info['phone']}\n"
+            f"Bundesland: {delivery_info['bundesland']}\n"
+            f"Stadt: {delivery_info['stadt']}\n"
+            f"Straße: {delivery_info['strasse']}\n"
+            f"Трек-номер: {tracking_mark}"
+        )
+
+    order_text = (
+        f"{text_admin}\n"
+        f"ID: {order_id}\n"
+        f"User: @{username}\n"
+        f"Режим: {'Доставка' if cart_mode == 'delivery' else 'Самовывоз'}\n"
+        f"Оплата: 🧪 Тестовая (уже оплачено)\n"
+        f"ИТОГО: {total}€"
+        f"{delivery_block}"
+    )
+
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
+    )
+
+    msg_ids = []
+    for admin in ADMIN_IDS:
+        try:
+            sent = await bot.send_message(admin, order_text, reply_markup=kb)
+            msg_ids.append(f"{admin}:{sent.message_id}")
+        except Exception:
+            pass
+
+    if msg_ids:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE orders SET admin_message_ids=$1 WHERE id=$2",
+                ",".join(msg_ids), order_id
+            )
+
+# ========== ПРОФИЛЬ: АДРЕС ДОСТАВКИ ==========
+
+@dp.callback_query_handler(lambda c: c.data == "profile_delivery")
+async def profile_delivery(call: types.CallbackQuery):
+    uid = call.from_user.id
+    info = await get_delivery_info(uid)
+
+    if not info:
+        await call.answer()
+        return
+
+    lang = await get_lang(uid)
+    texts = TEXTS[lang]
+    tracking_label = texts["delivery_tracking_label"]
+    tracking_mark = "✅" if info["with_tracking"] else "❌"
+
+    text = (
+        f"{texts['delivery_profile_title']}\n\n"
+        f"{texts['delivery_name_label']} {info['full_name']}\n\n"
+        f"{texts['delivery_phone_label']} {info['phone']}\n\n"
+        f"{texts['delivery_address_label']}\n"
+        f"Bundesland: {info['bundesland']}\n"
+        f"Stadt: {info['stadt']}\n"
+        f"Straße: {info['strasse']}\n\n"
+        f"{tracking_label} {tracking_mark}"
+    )
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data="profile"))
+
+    await render(call, text, kb)
+
 # ========== ОПЛАТА ==========
 
 @dp.callback_query_handler(lambda c: c.data == "pay")
 async def pay(call):
     uid = call.from_user.id
+    cart_mode = await get_cart_mode(uid)
+
+    # Перед показом оплаты — проверить данные доставки (если режим доставки)
+    if cart_mode == "delivery":
+        info = await get_delivery_info(uid)
+        if not info:
+            # Первое оформление — запускаем FSM
+            await _start_delivery_form(call, uid)
+            return
 
     kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"),
-        InlineKeyboardButton(await t(uid, "usdt"), callback_data="usdt"),
-    )
-    kb.add(
-        InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart")
-    )
+    if cart_mode != "delivery":
+        kb.add(InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"))
+    kb.add(InlineKeyboardButton(await t(uid, "usdt"), callback_data="usdt"))
+    kb.add(InlineKeyboardButton(await t(uid, "delivery_test_pay"), callback_data="delivery_test_pay"))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
 
     await render(call, await t(uid, "pay"), kb)
 
@@ -3068,7 +3569,28 @@ async def confirm_cash(call):
         InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
     )
 
-    order_text = f"{text_admin}\n\nID: {order_id}\nUser: @{username}\nОплата: Наличные\n ИТОГО: {total}€"
+    cart_mode = await get_cart_mode(uid)
+    delivery_info = await get_delivery_info(uid) if cart_mode == "delivery" else None
+    delivery_block = ""
+    if delivery_info:
+        tracking_mark = "✅" if delivery_info["with_tracking"] else "❌"
+        delivery_block = (
+            f"\n\n📦 ДОСТАВКА:\n"
+            f"Имя: {delivery_info['full_name']}\n"
+            f"Телефон: {delivery_info['phone']}\n"
+            f"Bundesland: {delivery_info['bundesland']}\n"
+            f"Stadt: {delivery_info['stadt']}\n"
+            f"Straße: {delivery_info['strasse']}\n"
+            f"Трек-номер: {tracking_mark}"
+        )
+
+    order_text = (
+        f"{text_admin}\n\n"
+        f"ID: {order_id}\nUser: @{username}\n"
+        f"Режим: {'Доставка' if cart_mode == 'delivery' else 'Самовывоз'}\n"
+        f"Оплата: Наличные\nИТОГО: {total}€"
+        f"{delivery_block}"
+    )
     msg_ids = []
     for admin in ADMIN_IDS:
         try:
@@ -3195,12 +3717,29 @@ async def _finalize_cryptobot_order(order_id: int, uid: int, order):
             if product:
                 text_admin += f"{product['name_ru']} x{qty}\n"
 
+    cart_mode = await get_cart_mode(uid)
+    delivery_info = await get_delivery_info(uid) if cart_mode == "delivery" else None
+    delivery_block = ""
+    if delivery_info:
+        tracking_mark = "✅" if delivery_info["with_tracking"] else "❌"
+        delivery_block = (
+            f"\n\n📦 ДОСТАВКА:\n"
+            f"Имя: {delivery_info['full_name']}\n"
+            f"Телефон: {delivery_info['phone']}\n"
+            f"Bundesland: {delivery_info['bundesland']}\n"
+            f"Stadt: {delivery_info['stadt']}\n"
+            f"Straße: {delivery_info['strasse']}\n"
+            f"Трек-номер: {tracking_mark}"
+        )
+
     order_text = (
         f"{text_admin}\n"
         f"ID: {order_id}\n"
         f"User: @{username}\n"
+        f"Режим: {'Доставка' if cart_mode == 'delivery' else 'Самовывоз'}\n"
         f"Оплата: CryptoBot ✅ (уже оплачено)\n"
         f"ИТОГО: {order['total']}€"
+        f"{delivery_block}"
     )
 
     kb = InlineKeyboardMarkup()
