@@ -3093,8 +3093,6 @@ async def render_category_shop(target, uid, category):
 
     if delivery == True:
         text += await t(uid, "free_delivery_hint") + "\n\n"
-    else:
-        
 
     kb = InlineKeyboardMarkup()
 
