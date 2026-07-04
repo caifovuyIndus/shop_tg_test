@@ -16,18 +16,10 @@ from aiogram.utils import executor
 
 API_TOKEN = "7686799347:AAFBQFwQAwtm02bsxEReUQPutUcMO58yHxs"
 ADMIN_IDS = [7805603791, 8283121468, 5317145892] 
-WALLET = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
-
-# ── PayPal Sandbox ──────────────────────────────────────────────────────────
-PAYPAL_CLIENT_ID     = os.getenv("PAYPAL_CLIENT_ID",
-    "Ad7cYKnQJPf3iCtlUKn6ACAgLBctxq96x4Qt-sXvHAZkHCcrmEEB9WIj6HOy4MaHCcaWFb2yON6pLLKO")
-PAYPAL_SECRET        = os.getenv("PAYPAL_SECRET",
-    "EONipH-lUypcV8ppqZKTr5tnb4xC0svmnuPTAfqGWZais1StpfMIw3vTxKnm4y8vq2jGO64reh5mksNs")
-PAYPAL_BASE          = "https://api-m.paypal.com"
-PAYPAL_WEBHOOK_PORT  = int(os.getenv("PORT", "8080"))
-PAYPAL_WEBHOOK_PATH  = "/paypal/webhook"
-# Публичный URL Railway-деплоя (задать в переменных окружения)
-PUBLIC_URL           = os.getenv("PUBLIC_URL", "https://shoptgtest-production.up.railway.app")  # напр. https://xxx.up.railway.app 
+CRYPTOBOT_TOKEN     = os.getenv("CRYPTOBOT_TOKEN", "604617:AAWqkQtz77IxSlpPJw6fzAHfGOlUeu88orQ")
+CRYPTOBOT_BASE      = "https://pay.crypt.bot/api"
+CRYPTOBOT_WEBHOOK_PORT = int(os.getenv("PORT", "8080"))
+CRYPTOBOT_WEBHOOK_PATH = "/cryptobot/webhook"
 def is_admin(uid):
     return uid in ADMIN_IDS 
 
@@ -204,33 +196,10 @@ async def init_db():
             ADD COLUMN IF NOT EXISTS banned BOOLEAN DEFAULT false
         """)
 
-        # Фиксация курса EUR -> USDT на 30 минут (временное хранилище —
-        # пока пользователь смотрит экран оплаты, заказ ещё не создан).
-        # Переносится в orders в момент нажатия "Я оплатил" и очищается.
-        await conn.execute("""
-            ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS usdt_lock_eur REAL,
-            ADD COLUMN IF NOT EXISTS usdt_lock_discount REAL,
-            ADD COLUMN IF NOT EXISTS usdt_lock_rate REAL,
-            ADD COLUMN IF NOT EXISTS usdt_lock_usdt REAL,
-            ADD COLUMN IF NOT EXISTS usdt_lock_created_at TIMESTAMP,
-            ADD COLUMN IF NOT EXISTS usdt_lock_expires_at TIMESTAMP
-        """)
-
-        # Постоянная запись зафиксированного курса USDT в самом заказе
-        # (order_total_eur не дублируем — это уже существующее поле orders.total).
+        # CryptoBot invoice ID для сверки при подтверждении оплаты
         await conn.execute("""
             ALTER TABLE orders
-            ADD COLUMN IF NOT EXISTS eur_usdt_rate REAL,
-            ADD COLUMN IF NOT EXISTS order_total_usdt REAL,
-            ADD COLUMN IF NOT EXISTS payment_created_at TIMESTAMP,
-            ADD COLUMN IF NOT EXISTS payment_expires_at TIMESTAMP
-        """)
-
-        # PayPal order ID для сверки при подтверждении оплаты
-        await conn.execute("""
-            ALTER TABLE orders
-            ADD COLUMN IF NOT EXISTS paypal_order_id TEXT
+            ADD COLUMN IF NOT EXISTS cryptobot_invoice_id BIGINT
         """)
 
         # Глобальная заморозка Buy Streak: каждая строка — один период
@@ -516,24 +485,18 @@ TEXTS = {
         "back_shop": "🛒 Вернуться в магазин",
         "pay": "💳 Оплата",
         "cash": "💵 Наличные",
-        "usdt": "💳 USDT",
-        "paypal": "🅿️ PayPal",
-        "paypal_pay_btn": "💳 Оплатить через PayPal",
-        "paypal_waiting": "⏳ Ожидаем оплату через PayPal...\n\nПосле оплаты нажмите кнопку ниже.",
-        "paypal_paid_btn": "✅ Я оплатил",
-        "paypal_success": "✅ Оплата успешно получена.\n\nВаш заказ передан в обработку.\n\nАдминистратор скоро свяжется с вами.",
-        "paypal_error": "❌ Не удалось создать платёж PayPal. Попробуйте другой способ оплаты.",
-        "paypal_not_paid": "❌ Оплата ещё не подтверждена PayPal. Попробуйте через несколько секунд.",
+        "usdt": "💳 CryptoBot / Банковская карта",
+        "cryptobot_pay_btn": "💳 Оплатить",
+        "cryptobot_payment_screen": "💶 Сумма заказа: {eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 К оплате:\n{usdt} USDT (Polygon)\n\n💳 Также можно оплатить банковской картой через CryptoBot.",
+        "cryptobot_success": "✅ Оплата успешно получена.\n\nВаш заказ передан в обработку.\n\nАдминистратор скоро свяжется с вами.",
+        "cryptobot_error": "❌ Не удалось создать счёт. Попробуйте ещё раз или выберите другой способ оплаты.",
+        "rate_unavailable": "⚠️ Не удалось получить курс USDT. Попробуй ещё раз через минуту.",
         "cancel": "❌ Отмена",
         "order_done": "Заказ оформлен. Админ скоро свяжется",
         "confirm_order": "Подтвердить заказ?",
         "confirm": "✅ Подтвердить",
         "paid": "✅ Оплачено",
-        "checking_payment": "Проверяем оплату, админ скоро свяжется",
-        "wallet_text": "Оплати USDT\n\n{wallet}\n\n(нажми чтобы скопировать)",
-        "usdt_payment_screen": "💶 Сумма заказа: {eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 К оплате:\n{usdt} USDT (TRC20)\n\n📥 Адрес:\n{wallet}\n\nНажмите на адрес для копирования.",
-        "rate_unavailable": "⚠️ Не удалось получить курс USDT. Попробуй ещё раз через минуту.",
-        "rate_expired_retry": "⏳ Курс устарел, открой оплату USDT заново.",
+        "checking_payment": "⏳ Заказ оформлен",
         "fav_added": "Добавлено в избранное",
         "fav_removed": "Убрано из избранного",
         "favorites": "❤️ Избранное",
@@ -663,24 +626,18 @@ TEXTS = {
         "back_shop": "🛒 Назад до магазину",
         "pay": "💳 Оплата",
         "cash": "💵 Готівка",
-        "usdt": "💳 USDT",
-        "paypal": "🅿️ PayPal",
-        "paypal_pay_btn": "💳 Сплатити через PayPal",
-        "paypal_waiting": "⏳ Очікуємо оплату через PayPal...\n\nПісля оплати натисни кнопку нижче.",
-        "paypal_paid_btn": "✅ Я оплатив",
-        "paypal_success": "✅ Оплата успішно отримана.\n\nВаше замовлення передано в обробку.\n\nАдміністратор незабаром зв'яжеться з вами.",
-        "paypal_error": "❌ Не вдалося створити платіж PayPal. Спробуй інший спосіб оплати.",
-        "paypal_not_paid": "❌ Оплату ще не підтверджено PayPal. Спробуй через кілька секунд.",
+        "usdt": "💳 CryptoBot / Банківська карта",
+        "cryptobot_pay_btn": "💳 Оплатити",
+        "cryptobot_payment_screen": "💶 Сума замовлення: {eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 До оплати:\n{usdt} USDT (Polygon)\n\n💳 Також можна оплатити банківською карткою через CryptoBot.",
+        "cryptobot_success": "✅ Оплата успішно отримана.\n\nВаше замовлення передано в обробку.\n\nАдміністратор незабаром зв'яжеться з вами.",
+        "cryptobot_error": "❌ Не вдалося створити рахунок. Спробуй ще раз або вибери інший спосіб оплати.",
+        "rate_unavailable": "⚠️ Не вдалося отримати курс USDT. Спробуй ще раз за хвилину.",
         "cancel": "❌ Скасувати",
         "order_done": "Замовлення оформлене. Адмін скоро зв'яжеться",
         "confirm_order": "Підтвердити замовлення?",
         "confirm": "✅ Підтвердити",
         "paid": "✅ Оплачено",
-        "checking_payment": "Перевіряємо оплату, адмін скоро зв’яжеться",
-        "wallet_text": "Оплати USDT\n\n{wallet}\n\n(натисни щоб скопіювати)",
-        "usdt_payment_screen": "💶 Сума замовлення: {eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 До оплати:\n{usdt} USDT (TRC20)\n\n📥 Адреса:\n{wallet}\n\nНатисни на адресу, щоб скопіювати.",
-        "rate_unavailable": "⚠️ Не вдалося отримати курс USDT. Спробуй ще раз за хвилину.",
-        "rate_expired_retry": "⏳ Курс застарів, відкрий оплату USDT знову.",
+        "checking_payment": "⏳ Замовлення оформлене",
         "fav_added": "Додано до обраного",
         "fav_removed": "Прибрано з обраного",
         "favorites": "❤️ Обране",
@@ -810,24 +767,19 @@ TEXTS = {
         "back_shop": "🛒 Zurück zum Shop",
         "pay": "💳 Zahlung",
         "cash": "💵 Bar",
-        "usdt": "💳 USDT",
-        "paypal": "🅿️ PayPal",
-        "paypal_pay_btn": "💳 Per PayPal bezahlen",
-        "paypal_waiting": "⏳ Warte auf PayPal-Zahlung...\n\nNach der Zahlung bitte unten klicken.",
-        "paypal_paid_btn": "✅ Ich habe gezahlt",
-        "paypal_success": "✅ Zahlung erfolgreich erhalten.\n\nIhre Bestellung wird bearbeitet.\n\nDer Admin meldet sich bald.",
-        "paypal_error": "❌ PayPal-Zahlung konnte nicht erstellt werden. Bitte andere Zahlungsart wählen.",
-        "paypal_not_paid": "❌ Zahlung noch nicht von PayPal bestätigt. Bitte in einigen Sekunden erneut versuchen.",
+        "usdt": "💳 CryptoBot / Bankkarte",
+        "cryptobot_pay_btn": "💳 Bezahlen",
+        "cryptobot_payment_screen": "💶 Bestellsumme: {eur}€\n\n💲 Kurs:\n1 EUR = {rate} USDT\n\n💵 Zu zahlen:\n{usdt} USDT (Polygon)\n\n💳 Zahlung auch per Bankkarte über CryptoBot möglich.",
+        "cryptobot_success": "✅ Zahlung erfolgreich erhalten.\n\nIhre Bestellung wird bearbeitet.\n\nDer Admin meldet sich bald.",
+        "cryptobot_error": "❌ Rechnung konnte nicht erstellt werden. Bitte erneut versuchen oder andere Zahlungsart wählen.",
+        "rate_unavailable": "⚠️ Der USDT-Kurs konnte nicht abgerufen werden. Versuche es in einer Minute erneut.",
         "cancel": "❌ Abbrechen",
         "order_done": "Bestellung erstellt. Admin meldet sich",
         "confirm_order": "Bestellung bestätigen?",
         "confirm": "✅ Bestätigen",
         "paid": "✅ Bezahlt",
         "checking_payment": "Zahlung wird geprüft, Admin meldet sich",
-        "wallet_text": "Zahle USDT\n\n{wallet}\n\n(klicken zum Kopieren)",
-        "usdt_payment_screen": "💶 Bestellsumme: {eur}€\n\n💲 Kurs:\n1 EUR = {rate} USDT\n\n💵 Zu zahlen:\n{usdt} USDT (TRC20)\n\n📥 Adresse:\n{wallet}\n\nTippe auf die Adresse, um sie zu kopieren.",
         "rate_unavailable": "⚠️ Der USDT-Kurs konnte nicht abgerufen werden. Versuche es in einer Minute erneut.",
-        "rate_expired_retry": "⏳ Der Kurs ist abgelaufen, öffne die USDT-Zahlung erneut.",
         "fav_added": "Zu Favoriten hinzugefügt",
         "fav_removed": "Aus Favoriten entfernt",
         "favorites": "❤️ Favoriten",
@@ -1199,241 +1151,100 @@ def fmt_amount(value) -> str:
     text = f"{value:.2f}".rstrip("0").rstrip(".")
     return text or "0"
 
-# ========== USDT: КУРС И ФИКСАЦИЯ ==========
+# ========== CRYPTOBOT ==========
 
-USDT_RATE_LOCK_MINUTES = 30
+CRYPTOBOT_HEADERS = {
+    "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
+    "Content-Type": "application/json",
+}
 
 
-async def get_eur_usdt_rate():
-    """
-    Текущий курс 1 EUR -> USDT.
-    Основной источник — Binance (пара EURUSDT), т.к. кошелёк для приёма
-    платежей именно на Binance. Если Binance недоступен — берём курс
-    EUR->USD с ECB (через Frankfurter, без ключа) как практический эквивалент
-    (USDT исторически близок к 1 USD). Возвращает None, если оба источника
-    недоступны.
-    """
+async def get_eur_usdt_rate() -> float | None:
+    """Текущий курс 1 EUR -> USDT через Binance."""
     try:
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
+        async with aiohttp.ClientSession() as session:
+            resp = await session.get(
                 "https://api.binance.com/api/v3/ticker/price",
-                params={"symbol": "EURUSDT"}
-            ) as resp:
-                data = await resp.json()
-                return round(float(data["price"]), 2)
+                params={"symbol": "EURUSDT"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            )
+            data = await resp.json()
+        return float(data["price"])
     except Exception:
-        logging.exception("Binance недоступен, пробую резервный источник курса EUR/USDT")
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(
-                "https://api.frankfurter.dev/v1/latest",
-                params={"from": "EUR", "to": "USD"}
-            ) as resp:
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    "https://api.coingecko.com/api/v3/simple/price",
+                    params={"ids": "tether", "vs_currencies": "eur"},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                )
                 data = await resp.json()
-                return round(float(data["rates"]["USD"]), 2)
-    except Exception:
-        logging.exception("Резервный источник курса EUR/USDT тоже недоступен")
-        return None
+            raw = data["tether"]["eur"]
+            return round(1 / raw, 4)
+        except Exception:
+            return None
 
 
-async def get_or_create_usdt_lock(uid, eur_total, discount):
+def fmt_amount(value) -> str:
+    value = round(float(value), 2)
+    text = f"{value:.2f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+async def cryptobot_create_invoice(amount_eur: float, usdt_amount: float, order_id: int) -> dict | None:
     """
-    Возвращает зафиксированные значения оплаты USDT для этого пользователя:
-    {"eur", "discount", "rate", "usdt", "created_at", "expires_at"}.
-
-    Если есть ещё действующая (не истёкшая) фиксация — возвращает её БЕЗ
-    изменений, даже если переданные eur_total/discount отличаются от того,
-    что было зафиксировано изначально (курс и сумма не должны меняться
-    "за спиной" пользователя в течение 30 минут).
-
-    Если фиксации нет или она истекла — запрашивает новый курс и создаёт
-    новую фиксацию на основе переданной суммы.
-
-    Возвращает None, если курс получить не удалось (оба источника недоступны).
+    Создать Invoice в CryptoBot на сумму usdt_amount USDT (Polygon).
+    Возвращает {"invoice_id": ..., "pay_url": ...} или None при ошибке.
     """
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT usdt_lock_eur, usdt_lock_discount, usdt_lock_rate,
-                   usdt_lock_usdt, usdt_lock_created_at, usdt_lock_expires_at
-            FROM users WHERE user_id=$1
-        """, uid)
-
-    now = datetime.now()
-
-    if row and row["usdt_lock_expires_at"] and row["usdt_lock_expires_at"] > now:
-        return {
-            "eur": row["usdt_lock_eur"],
-            "discount": row["usdt_lock_discount"] or 0,
-            "rate": row["usdt_lock_rate"],
-            "usdt": row["usdt_lock_usdt"],
-            "created_at": row["usdt_lock_created_at"],
-            "expires_at": row["usdt_lock_expires_at"],
-        }
-
-    rate = await get_eur_usdt_rate()
-
-    if rate is None:
-        return None
-
-    usdt_amount = round(eur_total * rate, 2)
-    created_at = now
-    expires_at = now + timedelta(minutes=USDT_RATE_LOCK_MINUTES)
-
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE users SET
-                usdt_lock_eur=$1,
-                usdt_lock_discount=$2,
-                usdt_lock_rate=$3,
-                usdt_lock_usdt=$4,
-                usdt_lock_created_at=$5,
-                usdt_lock_expires_at=$6
-            WHERE user_id=$7
-        """, eur_total, discount, rate, usdt_amount, created_at, expires_at, uid)
-
-    return {
-        "eur": eur_total,
-        "discount": discount,
-        "rate": rate,
-        "usdt": usdt_amount,
-        "created_at": created_at,
-        "expires_at": expires_at,
+    payload = {
+        "asset": "USDT",
+        "amount": str(round(usdt_amount, 2)),
+        "description": f"Order #{order_id} | {amount_eur}€",
+        "payload": str(order_id),
+        "paid_btn_name": "callback",
+        "paid_btn_url": "https://t.me/BIZZ_shop_bot",
+        "allow_comments": False,
+        "allow_anonymous": True,
+        "network": "polygon",
     }
-
-
-async def clear_usdt_lock(uid):
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE users SET
-                usdt_lock_eur=NULL,
-                usdt_lock_discount=NULL,
-                usdt_lock_rate=NULL,
-                usdt_lock_usdt=NULL,
-                usdt_lock_created_at=NULL,
-                usdt_lock_expires_at=NULL
-            WHERE user_id=$1
-        """, uid)
-
-# ========== PAYPAL ==========
-
-_paypal_token_cache: dict = {"token": None, "expires_at": 0}
-
-
-async def paypal_get_access_token() -> str | None:
-    """Получить Access Token PayPal (кэшируется до истечения срока)."""
-    import time
-    now = time.time()
-    if _paypal_token_cache["token"] and now < _paypal_token_cache["expires_at"] - 30:
-        return _paypal_token_cache["token"]
-
     try:
         async with aiohttp.ClientSession() as session:
             resp = await session.post(
-                f"{PAYPAL_BASE}/v1/oauth2/token",
-                data={"grant_type": "client_credentials"},
-                auth=aiohttp.BasicAuth(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
-                headers={"Accept": "application/json"},
+                f"{CRYPTOBOT_BASE}/createInvoice",
+                json=payload,
+                headers=CRYPTOBOT_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=10),
             )
             data = await resp.json()
-
-        if "access_token" not in data:
-            logging.error(f"PayPal token error: {data}")
+        if not data.get("ok"):
+            logging.error(f"CryptoBot createInvoice error: {data}")
             return None
-
-        _paypal_token_cache["token"] = data["access_token"]
-        _paypal_token_cache["expires_at"] = now + data.get("expires_in", 3600)
-        return _paypal_token_cache["token"]
+        result = data["result"]
+        return {"invoice_id": result["invoice_id"], "pay_url": result["pay_url"]}
     except Exception as e:
-        logging.error(f"PayPal token exception: {e}")
+        logging.error(f"CryptoBot createInvoice exception: {e}")
         return None
 
 
-async def paypal_create_order(amount_eur: float, order_id: int) -> dict | None:
-    """
-    Создать PayPal Order.
-    Возвращает {"paypal_order_id": ..., "approve_url": ...} или None при ошибке.
-    """
-    token = await paypal_get_access_token()
-    if not token:
-        return None
-
-    return_url = f"{PUBLIC_URL}{PAYPAL_WEBHOOK_PATH}/return?bot_order_id={order_id}"
-    cancel_url = f"{PUBLIC_URL}{PAYPAL_WEBHOOK_PATH}/cancel?bot_order_id={order_id}"
-
-    payload = {
-        "intent": "CAPTURE",
-        "purchase_units": [{
-            "reference_id": str(order_id),
-            "amount": {
-                "currency_code": "EUR",
-                "value": f"{amount_eur:.2f}",
-            },
-            "description": f"Order #{order_id}",
-        }],
-        "application_context": {
-            "return_url": return_url,
-            "cancel_url": cancel_url,
-            "brand_name": "BIZZ Shop",
-            "user_action": "PAY_NOW",
-        },
-    }
-
+async def cryptobot_get_invoice(invoice_id: int) -> dict | None:
+    """Получить Invoice по ID для проверки статуса."""
     try:
         async with aiohttp.ClientSession() as session:
-            resp = await session.post(
-                f"{PAYPAL_BASE}/v2/checkout/orders",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                timeout=aiohttp.ClientTimeout(total=15),
+            resp = await session.get(
+                f"{CRYPTOBOT_BASE}/getInvoices",
+                params={"invoice_ids": str(invoice_id)},
+                headers=CRYPTOBOT_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10),
             )
             data = await resp.json()
-
-        if data.get("status") != "CREATED":
-            logging.error(f"PayPal create order error: {data}")
+        if not data.get("ok"):
             return None
-
-        approve_url = next(
-            (l["href"] for l in data.get("links", []) if l["rel"] == "approve"),
-            None,
-        )
-        return {"paypal_order_id": data["id"], "approve_url": approve_url}
+        items = data["result"].get("items", [])
+        return items[0] if items else None
     except Exception as e:
-        logging.error(f"PayPal create order exception: {e}")
+        logging.error(f"CryptoBot getInvoice exception: {e}")
         return None
 
-
-async def paypal_capture_order(paypal_order_id: str) -> bool:
-    """
-    Capture (списать деньги) по PayPal Order.
-    Возвращает True если платёж успешно захвачен (status == COMPLETED).
-    """
-    token = await paypal_get_access_token()
-    if not token:
-        return False
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            resp = await session.post(
-                f"{PAYPAL_BASE}/v2/checkout/orders/{paypal_order_id}/capture",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                timeout=aiohttp.ClientTimeout(total=15),
-            )
-            data = await resp.json()
-
-        return data.get("status") == "COMPLETED"
-    except Exception as e:
-        logging.error(f"PayPal capture exception: {e}")
-        return False
 
 async def is_streak_frozen() -> bool:
     """Активна ли сейчас глобальная заморозка Buy Streak."""
@@ -3183,17 +2994,14 @@ async def pay(call):
 
     kb = InlineKeyboardMarkup()
     kb.add(
-        InlineKeyboardButton(await t(uid,"cash"), callback_data="cash"),
-        InlineKeyboardButton(await t(uid,"usdt"), callback_data="usdt"),
+        InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"),
+        InlineKeyboardButton(await t(uid, "usdt"), callback_data="usdt"),
     )
     kb.add(
-        InlineKeyboardButton(await t(uid,"paypal"), callback_data="paypal"),
-    )
-    kb.add(
-        InlineKeyboardButton(await t(uid,"cancel"), callback_data="open_cart")
+        InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart")
     )
 
-    await render(call, await t(uid,"pay"), kb)
+    await render(call, await t(uid, "pay"), kb)
 
 @dp.callback_query_handler(lambda c: c.data == "cash")
 async def cash(call):
@@ -3276,7 +3084,7 @@ async def confirm_cash(call):
             """, ",".join(msg_ids), order_id)
 
 @dp.callback_query_handler(lambda c: c.data == "usdt")
-async def usdt(call):
+async def cryptobot_pay(call):
     if not await check_not_banned(call):
         return
 
@@ -3284,7 +3092,7 @@ async def usdt(call):
 
     async with pool.acquire() as conn:
         cart_items = await conn.fetch(
-            "SELECT quantity FROM cart WHERE user_id=$1", uid
+            "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
         )
 
     if not cart_items:
@@ -3294,145 +3102,12 @@ async def usdt(call):
     total_qty = sum(r["quantity"] for r in cart_items)
     eur_total, discount = await calculate_final_price(uid, total_qty)
 
-    lock = await get_or_create_usdt_lock(uid, eur_total, discount)
-
-    if lock is None:
+    rate = await get_eur_usdt_rate()
+    if not rate:
         await call.answer(await t(uid, "rate_unavailable"), show_alert=True)
         return
 
-    text = (await t(uid, "usdt_payment_screen")).format(
-        eur=fmt_amount(lock["eur"]),
-        rate=fmt_amount(lock["rate"]),
-        usdt=fmt_amount(lock["usdt"]),
-        wallet=f"<code>{WALLET}</code>"
-    )
-
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton(await t(uid,"cancel"), callback_data="pay"),
-        InlineKeyboardButton(await t(uid,"paid"), callback_data="paid")
-    )
-
-    await render(call, text, kb)
-
-@dp.callback_query_handler(lambda c: c.data == "paid")
-async def paid(call):
-    if not await check_not_banned(call):
-        return
-
-    uid = call.from_user.id
-    username = call.from_user.username or "нет username"
-
-    async with pool.acquire() as conn:
-        cart_items = await conn.fetch("""
-            SELECT product_id, quantity 
-            FROM cart 
-            WHERE user_id=$1
-        """, uid)
-
-        if not cart_items:
-            await render(call, await t(uid,"empty_cart"))
-            return
-
-        lock_row = await conn.fetchrow("""
-            SELECT usdt_lock_eur, usdt_lock_discount, usdt_lock_rate,
-                   usdt_lock_usdt, usdt_lock_created_at, usdt_lock_expires_at
-            FROM users WHERE user_id=$1
-        """, uid)
-
-    # Зафиксированных значений нет или они истекли — заказ создавать нельзя,
-    # пользователь должен сначала заново открыть экран оплаты USDT и увидеть
-    # актуальные цифры, прежде чем они лягут в заказ.
-    if (not lock_row or not lock_row["usdt_lock_expires_at"]
-            or lock_row["usdt_lock_expires_at"] <= datetime.now()):
-        await call.answer(await t(uid, "rate_expired_retry"), show_alert=True)
-        return
-
-    items_str = ",".join([f"{r['product_id']}:{r['quantity']}" for r in cart_items])
-
-    # Берём СТРОГО зафиксированные значения — то, что пользователь видел на
-    # экране оплаты. Ничего не пересчитываем, даже если корзина изменилась.
-    total = lock_row["usdt_lock_eur"]
-    discount = lock_row["usdt_lock_discount"] or 0
-    rate = lock_row["usdt_lock_rate"]
-    usdt_amount = lock_row["usdt_lock_usdt"]
-    payment_created_at = lock_row["usdt_lock_created_at"]
-    payment_expires_at = lock_row["usdt_lock_expires_at"]
-
-    async with pool.acquire() as conn:
-        text_admin = "ЗАКАЗ:\n"
-
-        for r in cart_items:
-            product = await conn.fetchrow("""
-                SELECT name_ru 
-                FROM products 
-                WHERE id=$1
-            """, r["product_id"])
-
-            text_admin += f"{product['name_ru']} x{r['quantity']}\n"
-
-        order_id = await conn.fetchval("""
-            INSERT INTO orders
-                (user_id, items, total, payment, discount,
-                 eur_usdt_rate, order_total_usdt, payment_created_at, payment_expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING id
-        """, uid, items_str, total, "usdt", discount,
-             rate, usdt_amount, payment_created_at, payment_expires_at)
-
-        await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
-
-    await clear_usdt_lock(uid)
-
-    await render(call, await t(uid,"checking_payment"))
-
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
-        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
-    )
-
-    # Админы видят и сумму в EUR (которую видел пользователь), и точную
-    # сумму в USDT + курс, по которому она была зафиксирована.
-    order_text = (
-        f"{text_admin}\n\nID: {order_id}\nUser: @{username}\nОплата: USDT\n"
-        f"ИТОГО: {fmt_amount(total)}€ = {fmt_amount(usdt_amount)} USDT (курс 1 EUR = {fmt_amount(rate)} USDT)"
-    )
-    msg_ids = []
-    for admin in ADMIN_IDS:
-        try:
-            sent = await bot.send_message(admin, order_text, reply_markup=kb)
-            msg_ids.append(f"{admin}:{sent.message_id}")
-        except Exception:
-            pass
-
-    if msg_ids:
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE orders SET admin_message_ids=$1 WHERE id=$2
-            """, ",".join(msg_ids), order_id)
-
-# ========== PAYPAL ОПЛАТА ==========
-
-@dp.callback_query_handler(lambda c: c.data == "paypal")
-async def paypal_pay(call):
-    if not await check_not_banned(call):
-        return
-
-    uid = call.from_user.id
-
-    async with pool.acquire() as conn:
-        cart_items = await conn.fetch("""
-            SELECT product_id, quantity FROM cart WHERE user_id=$1
-        """, uid)
-
-    if not cart_items:
-        await render(call, await t(uid, "empty_cart"))
-        return
-
-    total_qty = sum(r["quantity"] for r in cart_items)
-    eur_total, discount = await calculate_final_price(uid, total_qty)
-    username = call.from_user.username or "нет username"
+    usdt_amount = round(eur_total * rate, 2)
 
     async with pool.acquire() as conn:
         text_admin = "ЗАКАЗ:\n"
@@ -3443,122 +3118,75 @@ async def paypal_pay(call):
             )
             text_admin += f"{product['name_ru']} x{r['quantity']}\n"
             items_str_parts.append(f"{r['product_id']}:{r['quantity']}")
-
         items_str = ",".join(items_str_parts)
 
-        # Создаём заказ в БД со статусом 'paypal_pending'
         order_id = await conn.fetchval("""
             INSERT INTO orders (user_id, items, total, payment, discount, status)
-            VALUES ($1, $2, $3, 'paypal', $4, 'paypal_pending')
+            VALUES ($1, $2, $3, 'cryptobot', $4, 'cryptobot_pending')
             RETURNING id
         """, uid, items_str, eur_total, discount)
 
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
 
-    # Создаём PayPal Order
-    result = await paypal_create_order(eur_total, order_id)
+    result = await cryptobot_create_invoice(eur_total, usdt_amount, order_id)
 
     if not result:
-        # Откатываем заказ если PayPal недоступен
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE orders SET status='cancelled' WHERE id=$1", order_id
             )
-        await render(call, await t(uid, "paypal_error"))
+        await render(call, await t(uid, "cryptobot_error"))
         return
 
-    paypal_order_id = result["paypal_order_id"]
-    approve_url = result["approve_url"]
+    invoice_id = result["invoice_id"]
+    pay_url = result["pay_url"]
 
-    # Сохраняем paypal_order_id
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE orders SET paypal_order_id=$1 WHERE id=$2",
-            paypal_order_id, order_id
+            "UPDATE orders SET cryptobot_invoice_id=$1 WHERE id=$2",
+            invoice_id, order_id
         )
 
+    text = (await t(uid, "cryptobot_payment_screen")).format(
+        eur=fmt_amount(eur_total),
+        rate=fmt_amount(rate),
+        usdt=fmt_amount(usdt_amount),
+    )
+
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(
-        await t(uid, "paypal_pay_btn"), url=approve_url
-    ))
-    kb.add(InlineKeyboardButton(
-        await t(uid, "paypal_paid_btn"),
-        callback_data=f"paypal_check_{order_id}"
-    ))
+    kb.add(InlineKeyboardButton(await t(uid, "cryptobot_pay_btn"), url=pay_url))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
 
-    await render(call, await t(uid, "paypal_waiting"), kb)
+    await render(call, text, kb)
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("paypal_check_"))
-async def paypal_check(call):
-    """Пользователь нажал 'Я оплатил' — проверяем и capture'им PayPal Order."""
-    if not await check_not_banned(call):
-        return
-
-    uid = call.from_user.id
-    order_id = int(call.data.split("_")[2])
-    username = call.from_user.username or "нет username"
-
-    async with pool.acquire() as conn:
-        order = await conn.fetchrow("""
-            SELECT status, paypal_order_id, total, discount, items
-            FROM orders WHERE id=$1 AND user_id=$2
-        """, order_id, uid)
-
-    if not order:
-        await call.answer("Заказ не найден", show_alert=True)
-        return
-
-    if order["status"] == "pending":
-        # Уже подтверждён через webhook — показываем сообщение об успехе
-        await render(call, await t(uid, "paypal_success"))
-        return
-
-    if order["status"] != "paypal_pending":
-        await render(call, await t(uid, "paypal_success"))
-        return
-
-    # Пытаемся capture (списать деньги у PayPal)
-    captured = await paypal_capture_order(order["paypal_order_id"])
-
-    if not captured:
-        await call.answer(await t(uid, "paypal_not_paid"), show_alert=True)
-        return
-
-    await _finalize_paypal_order(order_id, uid, order)
-
-
-async def _finalize_paypal_order(order_id: int, uid: int, order):
+async def _finalize_cryptobot_order(order_id: int, uid: int, order):
     """
-    Финализация PayPal заказа: обновить статус → уведомить пользователя и админов.
-    Идемпотентна: повторный вызов безопасен благодаря UPDATE WHERE status='paypal_pending'.
+    Финализация CryptoBot заказа. Идемпотентна через UPDATE WHERE status='cryptobot_pending'.
     """
     async with pool.acquire() as conn:
         updated = await conn.fetchval("""
             UPDATE orders SET status='pending'
-            WHERE id=$1 AND status='paypal_pending'
+            WHERE id=$1 AND status='cryptobot_pending'
             RETURNING id
         """, order_id)
 
     if not updated:
         return
 
-    # Берём реальный username пользователя из БД
     async with pool.acquire() as conn:
         username = await conn.fetchval(
             "SELECT username FROM users WHERE user_id=$1", uid
         ) or "нет username"
 
-    # Уведомление пользователю
     try:
-        await bot.send_message(uid, await t(uid, "paypal_success"))
+        await bot.send_message(uid, await t(uid, "cryptobot_success"))
     except Exception:
         pass
 
-    # Собираем текст для админов
     async with pool.acquire() as conn:
         items_str = order["items"]
-        text_admin = "ЗАКАЗ (оплачен через PayPal ✅):\n"
+        text_admin = "ЗАКАЗ (оплачен через CryptoBot ✅):\n"
         for part in items_str.split(","):
             pid, qty = part.split(":")
             product = await conn.fetchrow(
@@ -3567,13 +3195,12 @@ async def _finalize_paypal_order(order_id: int, uid: int, order):
             if product:
                 text_admin += f"{product['name_ru']} x{qty}\n"
 
-    total = order["total"]
     order_text = (
         f"{text_admin}\n"
         f"ID: {order_id}\n"
         f"User: @{username}\n"
-        f"Оплата: PayPal ✅ (уже оплачено)\n"
-        f"ИТОГО: {total}€"
+        f"Оплата: CryptoBot ✅ (уже оплачено)\n"
+        f"ИТОГО: {order['total']}€"
     )
 
     kb = InlineKeyboardMarkup()
@@ -3596,6 +3223,7 @@ async def _finalize_paypal_order(order_id: int, uid: int, order):
                 "UPDATE orders SET admin_message_ids=$1 WHERE id=$2",
                 ",".join(msg_ids), order_id
             )
+
 
 @dp.callback_query_handler(lambda c: c.data.startswith("admin_confirm_"))
 async def admin_confirm(call):
@@ -4005,59 +3633,35 @@ async def unstock_cmd(message: types.Message):
 
 # ========== ЗАПУСК ==========
 
-async def paypal_webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
+async def cryptobot_webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
     """
-    PayPal шлёт IPN/Webhook на этот endpoint при изменении статуса платежа.
-    Также принимает return_url редирект после оплаты (пользователь возвращается
-    с PayPal). Обрабатываем оба сценария в одном хендлере.
+    CryptoBot шлёт webhook при оплате Invoice.
+    Событие invoice_paid — Invoice оплачен.
     """
-    # Return URL: пользователь вернулся после оплаты
-    if request.method == "GET":
-        bot_order_id = int(request.rel_url.query.get("bot_order_id", 0))
-        token = request.rel_url.query.get("token", "")  # PayPal Order ID
-
-        if bot_order_id and token:
-            async with pool.acquire() as conn:
-                order = await conn.fetchrow("""
-                    SELECT id, user_id, status, paypal_order_id, total, discount, items
-                    FROM orders WHERE id=$1
-                """, bot_order_id)
-
-            if order and order["status"] == "paypal_pending":
-                captured = await paypal_capture_order(order["paypal_order_id"])
-                if captured:
-                    uid = order["user_id"]
-                    await _finalize_paypal_order(bot_order_id, uid, order)
-
-        return aiohttp.web.Response(
-            text="<html><body><h2>✅ Оплата получена. Вернитесь в Telegram.</h2></body></html>",
-            content_type="text/html"
-        )
-
-    # Webhook от PayPal (POST)
     try:
         data = await request.json()
     except Exception:
         return aiohttp.web.Response(status=400)
 
-    event_type = data.get("event_type", "")
+    if data.get("update_type") == "invoice_paid":
+        invoice = data.get("payload", {})
+        invoice_id = invoice.get("invoice_id")
+        payload_str = invoice.get("payload", "")  # наш order_id
 
-    if event_type == "CHECKOUT.ORDER.APPROVED":
-        resource = data.get("resource", {})
-        paypal_order_id = resource.get("id")
+        if invoice_id and payload_str:
+            try:
+                order_id = int(payload_str)
+            except ValueError:
+                return aiohttp.web.Response(text="ok")
 
-        if paypal_order_id:
             async with pool.acquire() as conn:
                 order = await conn.fetchrow("""
-                    SELECT id, user_id, status, paypal_order_id, total, discount, items
-                    FROM orders WHERE paypal_order_id=$1
-                """, paypal_order_id)
+                    SELECT id, user_id, status, items, total, discount
+                    FROM orders WHERE id=$1 AND cryptobot_invoice_id=$2
+                """, order_id, invoice_id)
 
-            if order and order["status"] == "paypal_pending":
-                captured = await paypal_capture_order(paypal_order_id)
-                if captured:
-                    uid = order["user_id"]
-                    await _finalize_paypal_order(order["id"], uid, order)
+            if order and order["status"] == "cryptobot_pending":
+                await _finalize_cryptobot_order(order_id, order["user_id"], order)
 
     return aiohttp.web.Response(text="ok")
 
@@ -4069,22 +3673,15 @@ async def on_startup(dp):
 async def run():
     await on_startup(dp)
 
-    # aiohttp-сервер для PayPal webhook и return URL
     app = aiohttp.web.Application()
-    app.router.add_get(f"{PAYPAL_WEBHOOK_PATH}/return", paypal_webhook_handler)
-    app.router.add_get(f"{PAYPAL_WEBHOOK_PATH}/cancel", lambda r: aiohttp.web.Response(
-        text="<html><body><h2>Оплата отменена. Вернитесь в Telegram.</h2></body></html>",
-        content_type="text/html"
-    ))
-    app.router.add_post(PAYPAL_WEBHOOK_PATH, paypal_webhook_handler)
+    app.router.add_post(CRYPTOBOT_WEBHOOK_PATH, cryptobot_webhook_handler)
 
     runner = aiohttp.web.AppRunner(app)
     await runner.setup()
-    site = aiohttp.web.TCPSite(runner, "0.0.0.0", PAYPAL_WEBHOOK_PORT)
+    site = aiohttp.web.TCPSite(runner, "0.0.0.0", CRYPTOBOT_WEBHOOK_PORT)
     await site.start()
-    logging.info(f"PayPal webhook listening on :{PAYPAL_WEBHOOK_PORT}{PAYPAL_WEBHOOK_PATH}")
+    logging.info(f"CryptoBot webhook listening on :{CRYPTOBOT_WEBHOOK_PORT}{CRYPTOBOT_WEBHOOK_PATH}")
 
-    # Запускаем polling рядом с aiohttp
     await dp.start_polling(reset_webhook=True)
 
 
