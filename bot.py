@@ -1462,11 +1462,6 @@ async def get_user_rate(uid: int, currency: str) -> float | None:
     return rate
 
 
-def fmt_amount(value) -> str:
-    """Убирает лишние нули: 15.20 -> '15.2', 15.00 -> '15'."""
-    value = round(float(value), 2)
-    text = f"{value:.2f}".rstrip("0").rstrip(".")
-    return text or "0"
 
 
 async def is_streak_frozen() -> bool:
