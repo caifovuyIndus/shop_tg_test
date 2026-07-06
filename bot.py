@@ -2496,6 +2496,19 @@ async def spin_now(call):
 
 # ========== ПОДАРОК (БЕСПЛАТНАЯ БАНКА) ==========
 
+def admin_order_kb(user_id: int, confirm_cb: str, confirm_label: str,
+                   cancel_cb: str, cancel_label: str) -> InlineKeyboardMarkup:
+    """Клавиатура для администраторов: подтвердить / отменить + открыть чат."""
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton(confirm_label, callback_data=confirm_cb),
+        InlineKeyboardButton(cancel_label,  callback_data=cancel_cb),
+    )
+    kb.add(
+        InlineKeyboardButton("💬 Открыть чат", url=f"tg://user?id={user_id}")
+    )
+    return kb
+
 @dp.callback_query_handler(lambda c: c.data == "open_gift_shop")
 async def open_gift_shop(call):
     if not await check_not_banned(call):
@@ -2862,10 +2875,12 @@ async def gift_apply(call):
         f"Выбранный товар:\n{name_ru}"
     )
 
-    admin_kb = InlineKeyboardMarkup()
-    admin_kb.add(
-        InlineKeyboardButton("✅ Выдано", callback_data=f"gift_issued_{request_id}"),
-        InlineKeyboardButton("❌ Отменить", callback_data=f"gift_rejected_{request_id}")
+    admin_kb = admin_order_kb(
+        uid,
+        confirm_cb=f"gift_issued_{request_id}",
+        confirm_label="✅ Выдано",
+        cancel_cb=f"gift_rejected_{request_id}",
+        cancel_label="❌ Отменить",
     )
 
     # Рассылаем всем админам и запоминаем message_id
@@ -2935,10 +2950,12 @@ async def gift_delivery_apply(call):
         f"{delivery_block}"
     )
 
-    admin_kb = InlineKeyboardMarkup()
-    admin_kb.add(
-        InlineKeyboardButton("✅ Выдано", callback_data=f"gift_issued_{request_id}"),
-        InlineKeyboardButton("❌ Отменить", callback_data=f"gift_rejected_{request_id}")
+    admin_kb = admin_order_kb(
+        uid,
+        confirm_cb=f"gift_issued_{request_id}",
+        confirm_label="✅ Выдано",
+        cancel_cb=f"gift_rejected_{request_id}",
+        cancel_label="❌ Отменить",
     )
 
     msg_ids = []
@@ -3959,10 +3976,12 @@ async def confirm_cash(call):
 
     await render(call, await t(uid,"order_done"))
 
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
-        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
+    kb = admin_order_kb(
+        uid,
+        confirm_cb=f"admin_confirm_{order_id}",
+        confirm_label="✅ Подтвердить",
+        cancel_cb=f"admin_cancel_{order_id}",
+        cancel_label="❌ Отменить",
     )
 
     order_text = f"{text_admin}\n\nID: {order_id}\nUser: @{username}\nОплата: Наличные\n ИТОГО: {total}€"
@@ -4034,10 +4053,12 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
         f"{payment_line}"
         f"{delivery_block}"
     )
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
-        InlineKeyboardButton("❌ Отменить",    callback_data=f"admin_cancel_{order_id}")
+    kb = admin_order_kb(
+        uid,
+        confirm_cb=f"admin_confirm_{order_id}",
+        confirm_label="✅ Подтвердить",
+        cancel_cb=f"admin_cancel_{order_id}",
+        cancel_label="❌ Отменить",
     )
     msg_ids = []
     for admin in ADMIN_IDS:
