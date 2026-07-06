@@ -4125,6 +4125,9 @@ async def paid_usdt(call):
     parts = call.data.split("_")
     eur_str, usdt_str, rate_str = parts[2], parts[3], parts[4]
 
+    cart_mode = await get_cart_mode(uid)
+    is_delivery = (cart_mode == "delivery")
+
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
@@ -4139,7 +4142,7 @@ async def paid_usdt(call):
         f"К оплате: {usdt_str} USDT\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -4189,6 +4192,9 @@ async def paid_card_eur(call):
     username = call.from_user.username or str(uid)
     eur_str = call.data.split("paid_card_eur_")[1]
 
+    cart_mode = await get_cart_mode(uid)
+    is_delivery = (cart_mode == "delivery")
+
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
@@ -4200,7 +4206,7 @@ async def paid_card_eur(call):
         f"Оплата: Банковская карта EUR (ожидает проверки)\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -4245,6 +4251,9 @@ async def paid_card_uah(call):
     parts = call.data.split("_")
     eur_str, uah_str, rate_str = parts[3], parts[4], parts[5]
 
+    cart_mode = await get_cart_mode(uid)
+    is_delivery = (cart_mode == "delivery")
+
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
@@ -4259,7 +4268,7 @@ async def paid_card_uah(call):
         f"К оплате: {uah_str} UAH\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
