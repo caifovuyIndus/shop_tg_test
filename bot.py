@@ -592,6 +592,8 @@ TEXTS = {
         "cash": "💵 Наличные",
         "cancel": "❌ Отмена",
         "order_done": "Заказ оформлен. Админ скоро свяжется",
+        "no_username_warning": "⚠️ У вас отсутствует Telegram username.\n\nИз-за этого админ не сможет первым написать вам, если потребуется уточнить детали заказа.\n\nПожалуйста, в будущем добавьте username в настройках Telegram — это значительно упростит связь по вашим заказам.",
+        "contact_admin_btn": "💬 Написать администратору",
         "confirm_order": "Подтвердить заказ?",
         "confirm": "✅ Подтвердить",
         "paid": "✅ Оплачено",
@@ -768,6 +770,8 @@ TEXTS = {
         "cash": "💵 Готівка",
         "cancel": "❌ Скасувати",
         "order_done": "Замовлення оформлене. Адмін скоро зв'яжеться",
+        "no_username_warning": "⚠️ У вас відсутній Telegram username.\n\nЧерез це адмін не зможе першим написати вам, якщо потрібно буде уточнити деталі замовлення.\n\nБудь ласка, в майбутньому додайте username у налаштуваннях Telegram — це значно спростить зв'язок щодо ваших замовлень.",
+        "contact_admin_btn": "💬 Написати адміністратору",
         "confirm_order": "Підтвердити замовлення?",
         "confirm": "✅ Підтвердити",
         "paid": "✅ Оплачено",
@@ -944,6 +948,8 @@ TEXTS = {
         "cash": "💵 Bar",
         "cancel": "❌ Abbrechen",
         "order_done": "Bestellung erstellt. Admin meldet sich",
+        "no_username_warning": "⚠️ Du hast keinen Telegram-Username.\n\nDadurch kann der Admin dich nicht zuerst kontaktieren, falls Details zur Bestellung geklärt werden müssen.\n\nBitte füge in Zukunft einen Username in den Telegram-Einstellungen hinzu — das erleichtert die Kommunikation zu deinen Bestellungen erheblich.",
+        "contact_admin_btn": "💬 Admin schreiben",
         "confirm_order": "Bestellung bestätigen?",
         "confirm": "✅ Bestätigen",
         "paid": "✅ Bezahlt",
@@ -1696,6 +1702,26 @@ async def render(target, text, kb=None, photo=None, parse_mode="HTML"):
                 reply_markup=kb,
                 parse_mode=parse_mode
             )
+
+async def notify_no_username(call_or_message, uid: int) -> None:
+    """
+    Если у пользователя нет username — отправляет дополнительное сообщение
+    с предупреждением и кнопкой для связи с администратором.
+    Вызывается ПОСЛЕ основного confirmation-сообщения.
+    """
+    username = call_or_message.from_user.username
+    if username:
+        return  # username есть — ничего не делаем
+    warning_text = await t(uid, "no_username_warning")
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(
+        await t(uid, "contact_admin_btn"),
+        url="https://t.me/bizzshop_admin"
+    ))
+    try:
+        await bot.send_message(uid, warning_text, reply_markup=kb)
+    except Exception:
+        pass
 # ========== МЕНЮ ==========
 
 def main_menu(lang):
@@ -2496,19 +2522,6 @@ async def spin_now(call):
 
 # ========== ПОДАРОК (БЕСПЛАТНАЯ БАНКА) ==========
 
-def admin_order_kb(user_id: int, confirm_cb: str, confirm_label: str,
-                   cancel_cb: str, cancel_label: str) -> InlineKeyboardMarkup:
-    """Клавиатура для администраторов: подтвердить / отменить + открыть чат."""
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton(confirm_label, callback_data=confirm_cb),
-        InlineKeyboardButton(cancel_label,  callback_data=cancel_cb),
-    )
-    kb.add(
-        InlineKeyboardButton("💬 Открыть чат", url=f"tg://user?id={user_id}")
-    )
-    return kb
-
 @dp.callback_query_handler(lambda c: c.data == "open_gift_shop")
 async def open_gift_shop(call):
     if not await check_not_banned(call):
@@ -2875,12 +2888,10 @@ async def gift_apply(call):
         f"Выбранный товар:\n{name_ru}"
     )
 
-    admin_kb = admin_order_kb(
-        uid,
-        confirm_cb=f"gift_issued_{request_id}",
-        confirm_label="✅ Выдано",
-        cancel_cb=f"gift_rejected_{request_id}",
-        cancel_label="❌ Отменить",
+    admin_kb = InlineKeyboardMarkup()
+    admin_kb.add(
+        InlineKeyboardButton("✅ Выдано", callback_data=f"gift_issued_{request_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"gift_rejected_{request_id}")
     )
 
     # Рассылаем всем админам и запоминаем message_id
@@ -2900,6 +2911,7 @@ async def gift_apply(call):
 
     # Подтверждение пользователю
     await render(call, await t(uid, "gift_done"))
+    await notify_no_username(call, uid)
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_delivery_apply_"))
@@ -2950,12 +2962,10 @@ async def gift_delivery_apply(call):
         f"{delivery_block}"
     )
 
-    admin_kb = admin_order_kb(
-        uid,
-        confirm_cb=f"gift_issued_{request_id}",
-        confirm_label="✅ Выдано",
-        cancel_cb=f"gift_rejected_{request_id}",
-        cancel_label="❌ Отменить",
+    admin_kb = InlineKeyboardMarkup()
+    admin_kb.add(
+        InlineKeyboardButton("✅ Выдано", callback_data=f"gift_issued_{request_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"gift_rejected_{request_id}")
     )
 
     msg_ids = []
@@ -2972,6 +2982,7 @@ async def gift_delivery_apply(call):
         """, ",".join(msg_ids), request_id)
 
     await render(call, await t(uid, "gift_done"))
+    await notify_no_username(call, uid)
 
 
 async def _sync_gift_admins(request_id: int, status_line: str):
@@ -3975,23 +3986,22 @@ async def confirm_cash(call):
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
 
     await render(call, await t(uid,"order_done"))
+    await notify_no_username(call, uid)
 
-    kb = admin_order_kb(
-        uid,
-        confirm_cb=f"admin_confirm_{order_id}",
-        confirm_label="✅ Подтвердить",
-        cancel_cb=f"admin_cancel_{order_id}",
-        cancel_label="❌ Отменить",
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
     )
 
-    order_text = f"{text_admin}\n\nID: {order_id}\nUser: @{username}\nОплата: Наличные\n ИТОГО: {total}€"
+    order_text = f"{text_admin}\n\nID: {order_id}\nUser: @{username}\nОплата: Наличные\nИТОГО: {total}€"
     msg_ids = []
     for admin in ADMIN_IDS:
         try:
             sent = await bot.send_message(admin, order_text, reply_markup=kb)
             msg_ids.append(f"{admin}:{sent.message_id}")
-        except Exception as e:
-            print(e)
+        except Exception:
+            pass
 
     if msg_ids:
         async with pool.acquire() as conn:
@@ -4043,9 +4053,10 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
 
 
 async def _send_order_to_admins(order_id: int, uid: int, username: str,
-                                 text_admin: str, payment_line: str) -> None:
+                                 text_admin: str, payment_line: str,
+                                 is_delivery: bool = True) -> None:
     """Отправляет заказ всем администраторам и сохраняет message_ids."""
-    delivery_block = await _build_delivery_admin_block(uid)
+    delivery_block = await _build_delivery_admin_block(uid) if is_delivery else ""
     order_text = (
         f"{text_admin}\n"
         f"ID: {order_id}\n"
@@ -4053,12 +4064,10 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
         f"{payment_line}"
         f"{delivery_block}"
     )
-    kb = admin_order_kb(
-        uid,
-        confirm_cb=f"admin_confirm_{order_id}",
-        confirm_label="✅ Подтвердить",
-        cancel_cb=f"admin_cancel_{order_id}",
-        cancel_label="❌ Отменить",
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
+        InlineKeyboardButton("❌ Отменить",    callback_data=f"admin_cancel_{order_id}")
     )
     msg_ids = []
     for admin in ADMIN_IDS:
@@ -4128,11 +4137,11 @@ async def paid_usdt(call):
         f"Сумма EUR: {eur_str}€\n"
         f"Курс: 1 EUR = {rate_str} USDT\n"
         f"К оплате: {usdt_str} USDT\n"
-        f"Кошелёк: {USDT_WALLET}\n"
         f"ИТОГО: {eur_str}€"
     )
     await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
     await render(call, await t(uid, "pay_pending_user"))
+    await notify_no_username(call, uid)
 
 
 # --- КАРТА: выбор валюты ---
@@ -4189,11 +4198,11 @@ async def paid_card_eur(call):
     order_id = await _create_pending_order(uid, items_str, eur_total, discount, "card_eur")
     payment_line = (
         f"Оплата: Банковская карта EUR (ожидает проверки)\n"
-        f"Карта: {CARD_EUR}\n"
         f"ИТОГО: {eur_str}€"
     )
     await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
     await render(call, await t(uid, "pay_pending_user"))
+    await notify_no_username(call, uid)
 
 
 # --- КАРТА UAH ---
@@ -4245,7 +4254,6 @@ async def paid_card_uah(call):
     order_id = await _create_pending_order(uid, items_str, eur_total, discount, "card_uah")
     payment_line = (
         f"Оплата: Банковская карта UAH (ожидает проверки)\n"
-        f"Карта: {CARD_UAH}\n"
         f"Сумма EUR: {eur_str}€\n"
         f"Курс: 1 EUR = {rate_str} UAH\n"
         f"К оплате: {uah_str} UAH\n"
@@ -4253,6 +4261,7 @@ async def paid_card_uah(call):
     )
     await _send_order_to_admins(order_id, uid, username, text_admin, payment_line)
     await render(call, await t(uid, "pay_pending_user"))
+    await notify_no_username(call, uid)
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("admin_confirm_"))
