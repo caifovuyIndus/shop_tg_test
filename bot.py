@@ -3990,8 +3990,8 @@ async def confirm_cash(call):
         try:
             sent = await bot.send_message(admin, order_text, reply_markup=kb)
             msg_ids.append(f"{admin}:{sent.message_id}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
 
     if msg_ids:
         async with pool.acquire() as conn:
