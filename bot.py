@@ -3994,7 +3994,7 @@ async def confirm_cash(call):
         InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
     )
 
-    order_text = f"{text_admin}\n\nID: {order_id}\nUser: @{username}\nОплата: Наличные\nИТОГО: {total}€"
+    order_text = f"🏪 Самовывоз | {text_admin}\n\nID: {order_id}\nUser: @{username}\nОплата: Наличные\nИТОГО: {total}€"
     msg_ids = []
     for admin in ADMIN_IDS:
         try:
@@ -4056,9 +4056,10 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
                                  text_admin: str, payment_line: str,
                                  is_delivery: bool = True) -> None:
     """Отправляет заказ всем администраторам и сохраняет message_ids."""
+    order_type = "🚚 Доставка" if is_delivery else "🏪 Самовывоз"
     delivery_block = await _build_delivery_admin_block(uid) if is_delivery else ""
     order_text = (
-        f"{text_admin}\n"
+        f"{order_type} | {text_admin}\n"
         f"ID: {order_id}\n"
         f"User: @{username}\n"
         f"{payment_line}"
