@@ -4163,7 +4163,7 @@ async def cash(call):
 
     kb = InlineKeyboardMarkup()
     kb.add(
-        InlineKeyboardButton(await t(uid,"cancel"), callback_data="pay"),
+        InlineKeyboardButton(await t(uid,"cancel"), callback_data="open_cart"),
         InlineKeyboardButton(await t(uid,"confirm"), callback_data="confirm_cash")
     )
 
