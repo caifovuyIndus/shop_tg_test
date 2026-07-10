@@ -366,6 +366,24 @@ async def init_db():
                                    ELSE products.image END
             """, *row)
 
+        # Колонка position: порядковый номер товара внутри категории (1, 2, 3...).
+        # Позволяет использовать /stock elfworld 1 вместо реального id из БД.
+        await conn.execute("""
+            ALTER TABLE products
+            ADD COLUMN IF NOT EXISTS position INTEGER DEFAULT 0
+        """)
+        # Проставляем position для всех товаров (в т.ч. уже существующих).
+        # Нумерация начинается с 1 внутри каждой категории, по порядку id.
+        await conn.execute("""
+            UPDATE products p
+            SET position = sub.rn
+            FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY id) AS rn
+                FROM products
+            ) sub
+            WHERE p.id = sub.id
+        """)
+
 # ========== ТОВАРЫ ==========
 
 products = [
@@ -4886,17 +4904,23 @@ async def _handle_stock_command(message: types.Message, in_stock: int):
             await message.answer("❌ ID товара должен быть числом или 'all'")
             return
 
-        result = await conn.execute(
-            "UPDATE products SET in_stock=$1 WHERE id=$2 AND category=$3",
-            in_stock, pid, category
+        row = await conn.fetchrow(
+            "SELECT id, name_ru FROM products WHERE position=$1 AND category=$2",
+            pid, category
         )
 
-    rows_affected = int(result.split()[-1]) if result else 0
+        if not row:
+            await message.answer(f"❌ Товар №{pid} не найден в разделе {section_label}")
+            return
 
-    if rows_affected == 0:
-        await message.answer(f"❌ Товар #{pid} не найден в разделе {section_label}")
-    else:
-        await message.answer(f"✅ Товар #{pid} {action_label_single} в разделе {section_label}")
+        await conn.execute(
+            "UPDATE products SET in_stock=$1 WHERE id=$2",
+            in_stock, row["id"]
+        )
+
+    await message.answer(
+        f"✅ Товар №{pid} ({row['name_ru']}) {action_label_single} в разделе {section_label}"
+    )
 
 
 @dp.message_handler(commands=["stock"])
