@@ -406,8 +406,13 @@ async def init_db():
             order_id INTEGER NOT NULL,
             product_id INTEGER NOT NULL,
             quantity INTEGER NOT NULL,
+            city_key TEXT DEFAULT NULL,
             PRIMARY KEY (order_id, product_id)
         )
+        """)
+        await conn.execute("""
+            ALTER TABLE reserved_stock
+            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
         """)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS promocodes (
@@ -3195,13 +3200,15 @@ async def gift_confirm(call):
         await call.answer(await t(uid, "gift_already_used"), show_alert=True)
         return
 
-    # Проверяем наличие выбранного товара
+    # Проверяем наличие выбранного товара по городу пользователя
+    user_city = await get_user_city(uid)
     async with pool.acquire() as conn:
         p = await conn.fetchrow(
-            "SELECT name_ru, name_ua, name_de, stock FROM products WHERE id=$1", pid
+            "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
         )
+        stock = await get_stock_for_city(conn, pid, user_city)
 
-    if not p or p["stock"] <= 0:
+    if not p or stock <= 0:
         await call.answer(
             (await t(uid, "stock_out")).format(name=p["name_ru"] if p else f"#{pid}"),
             show_alert=True
@@ -3244,13 +3251,15 @@ async def gift_delivery_confirm(call):
         await call.answer(await t(uid, "gift_already_used"), show_alert=True)
         return
 
-    # Проверяем наличие выбранного товара
+    # Проверяем наличие выбранного товара по городу пользователя
+    user_city = await get_user_city(uid)
     async with pool.acquire() as conn:
         p = await conn.fetchrow(
-            "SELECT name_ru, name_ua, name_de, stock FROM products WHERE id=$1", pid
+            "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
         )
+        stock = await get_stock_for_city(conn, pid, user_city)
 
-    if not p or p["stock"] <= 0:
+    if not p or stock <= 0:
         await call.answer(
             (await t(uid, "stock_out")).format(name=p["name_ru"] if p else f"#{pid}"),
             show_alert=True
@@ -3283,12 +3292,15 @@ async def gift_apply(call):
     pid = int(call.data.split("_")[2])
     username = call.from_user.username or "unknown"
 
-    # Финальная проверка наличия перед списанием
+    # Финальная проверка наличия с учётом города пользователя
+    user_city = await get_user_city(uid)
+    resolved_city = get_order_city(user_city)
     async with pool.acquire() as conn:
-        stock_row = await conn.fetchrow("SELECT name_ru, stock FROM products WHERE id=$1", pid)
-    if not stock_row or stock_row["stock"] <= 0:
+        product_name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
+        stock = await get_stock_for_city(conn, pid, user_city)
+    if stock <= 0:
         await call.answer(
-            (await t(uid, "stock_out")).format(name=stock_row["name_ru"] if stock_row else f"#{pid}"),
+            (await t(uid, "stock_out")).format(name=product_name),
             show_alert=True
         )
         return
@@ -3315,26 +3327,21 @@ async def gift_apply(call):
     lang = await get_lang(uid)
     name = p[f"name_{lang}"]
 
-    # Создаём заявку и резервируем stock
+    # Создаём заявку и резервируем stock по городу
     async with pool.acquire() as conn:
         request_id = await conn.fetchval("""
             INSERT INTO gift_requests (user_id, product_id, username)
             VALUES ($1, $2, $3)
             RETURNING id
         """, uid, pid, username)
-        # Резервируем 1 единицу товара
-        await conn.execute(
-            "UPDATE products SET stock = GREATEST(stock - 1, 0) WHERE id=$1", pid
-        )
+        # Резервируем 1 единицу в пуле города (отрицательный order_id чтобы не конфликтовать с orders)
+        await update_stock_for_city(conn, pid, user_city, -1)
         await conn.execute("""
-            INSERT INTO reserved_stock (order_id, product_id, quantity)
-            VALUES ($1, $2, 1)
-            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = 1
-        """, -request_id, pid)  # отрицательный id чтобы не конфликтовать с orders
+            INSERT INTO reserved_stock (order_id, product_id, quantity, city_key)
+            VALUES ($1, $2, 1, $3)
+            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = 1, city_key = EXCLUDED.city_key
+        """, -request_id, pid, resolved_city)
 
-    # Определяем город пользователя для маршрутизации
-    user_city = await get_user_city(uid)
-    resolved_city = get_order_city(user_city)
     city_admin_ids = get_city_admins(resolved_city) or ADMIN_IDS
 
     admin_text = (
@@ -3380,12 +3387,15 @@ async def gift_delivery_apply(call):
     pid = int(call.data.split("gift_delivery_apply_")[1])
     username = call.from_user.username or "unknown"
 
-    # Финальная проверка наличия
+    # Финальная проверка наличия с учётом города пользователя
+    user_city = await get_user_city(uid)
+    resolved_city = get_order_city(user_city)
     async with pool.acquire() as conn:
-        stock_row = await conn.fetchrow("SELECT name_ru, stock FROM products WHERE id=$1", pid)
-    if not stock_row or stock_row["stock"] <= 0:
+        product_name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
+        stock = await get_stock_for_city(conn, pid, user_city)
+    if stock <= 0:
         await call.answer(
-            (await t(uid, "stock_out")).format(name=stock_row["name_ru"] if stock_row else f"#{pid}"),
+            (await t(uid, "stock_out")).format(name=product_name),
             show_alert=True
         )
         return
@@ -3417,19 +3427,14 @@ async def gift_delivery_apply(call):
             VALUES ($1, $2, $3)
             RETURNING id
         """, uid, pid, username)
-        # Резервируем 1 единицу товара
-        await conn.execute(
-            "UPDATE products SET stock = GREATEST(stock - 1, 0) WHERE id=$1", pid
-        )
+        # Резервируем 1 единицу в пуле города
+        await update_stock_for_city(conn, pid, user_city, -1)
         await conn.execute("""
-            INSERT INTO reserved_stock (order_id, product_id, quantity)
-            VALUES ($1, $2, 1)
-            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = 1
-        """, -request_id, pid)
+            INSERT INTO reserved_stock (order_id, product_id, quantity, city_key)
+            VALUES ($1, $2, 1, $3)
+            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = 1, city_key = EXCLUDED.city_key
+        """, -request_id, pid, resolved_city)
 
-    # Определяем город пользователя для маршрутизации (delivery → buerhausen pool)
-    user_city = await get_user_city(uid)
-    resolved_city = get_order_city(user_city)
     city_admin_ids = get_city_admins(resolved_city) or ADMIN_IDS
 
     # Блок данных доставки для администратора
@@ -3848,19 +3853,22 @@ async def render_category_shop(target, uid, category):
     if not products:
         text += await t(uid, "section_empty") + "\n"
 
-    for p in products:
-        pid = p["id"]
-        name = p[f"name_{lang}"]
-        stock = p["stock"] if p["stock"] is not None else 0
+    user_city = await get_user_city(uid)
 
-        fav = await is_fav(uid, pid)
-        heart = "❤️" if fav else ""
+    async with pool.acquire() as conn:
+        for p in products:
+            pid = p["id"]
+            name = p[f"name_{lang}"]
+            stock = await get_stock_for_city(conn, pid, user_city)
 
-        status = "✅" if stock > 0 else "❌"
-        text += f"{name} {status} {heart}\n"
+            fav = await is_fav(uid, pid)
+            heart = "❤️" if fav else ""
 
-        if stock > 0:
-            kb.add(InlineKeyboardButton(name, callback_data=f"view_{pid}"))
+            status = "✅" if stock > 0 else "❌"
+            text += f"{name} {status} {heart}\n"
+
+            if stock > 0:
+                kb.add(InlineKeyboardButton(name, callback_data=f"view_{pid}"))
 
     other_category = "elfworld" if category == "elfliq" else "elfliq"
     switch_key = "switch_to_elfworld" if category == "elfliq" else "switch_to_elfliq"
@@ -4041,11 +4049,10 @@ async def add(call):
             WHERE user_id=$1 AND product_id=$2
         """, uid, pid)
 
-        # Проверяем что в наличии хватает на текущее кол-во + 1
-        product_row = await conn.fetchrow(
-            "SELECT name_ru, stock FROM products WHERE id=$1", pid
-        )
-        available = product_row["stock"] if product_row else 0
+        # Проверяем что в наличии хватает на текущее кол-во + 1 (с учётом города)
+        product_name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
+        user_city = await get_user_city(uid)
+        available = await get_stock_for_city(conn, pid, user_city)
         current_in_cart = 0
         if exists:
             current_in_cart = await conn.fetchval(
@@ -4054,14 +4061,12 @@ async def add(call):
         if current_in_cart + 1 > available:
             if available == 0:
                 await call.answer(
-                    (await t(uid, "stock_out")).format(name=product_row["name_ru"]),
+                    (await t(uid, "stock_out")).format(name=product_name),
                     show_alert=True
                 )
             else:
                 await call.answer(
-                    (await t(uid, "stock_low")).format(
-                        name=product_row["name_ru"], qty=available
-                    ),
+                    (await t(uid, "stock_low")).format(name=product_name, qty=available),
                     show_alert=True
                 )
             return
@@ -4181,22 +4186,19 @@ async def cart_plus(call):
         current_qty = await conn.fetchval(
             "SELECT quantity FROM cart WHERE user_id=$1 AND product_id=$2", uid, pid
         ) or 0
-        product_row = await conn.fetchrow(
-            "SELECT name_ru, stock FROM products WHERE id=$1", pid
-        )
-        available = product_row["stock"] if product_row else 0
+        product_name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
+        user_city = await get_user_city(uid)
+        available = await get_stock_for_city(conn, pid, user_city)
 
         if current_qty + 1 > available:
             if available == 0:
                 await call.answer(
-                    (await t(uid, "stock_out")).format(name=product_row["name_ru"]),
+                    (await t(uid, "stock_out")).format(name=product_name),
                     show_alert=True
                 )
             else:
                 await call.answer(
-                    (await t(uid, "stock_low")).format(
-                        name=product_row["name_ru"], qty=available
-                    ),
+                    (await t(uid, "stock_low")).format(name=product_name, qty=available),
                     show_alert=True
                 )
             return
@@ -4569,9 +4571,10 @@ async def _build_delivery_admin_block(uid: int) -> str:
 
 async def check_cart_stock(uid: int) -> list[dict] | None:
     """
-    Проверяет наличие всех товаров в корзине пользователя.
+    Проверяет наличие всех товаров в корзине пользователя с учётом города.
     Возвращает список проблем: [{"name": ..., "wanted": N, "available": M}] или None если всё OK.
     """
+    user_city = await get_user_city(uid)
     async with pool.acquire() as conn:
         cart_items = await conn.fetch(
             "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
@@ -4582,45 +4585,40 @@ async def check_cart_stock(uid: int) -> list[dict] | None:
         for item in cart_items:
             pid = item["product_id"]
             wanted = item["quantity"]
-            row = await conn.fetchrow(
-                "SELECT name_ru, stock FROM products WHERE id=$1", pid
-            )
-            available = row["stock"] if row else 0
+            name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
+            available = await get_stock_for_city(conn, pid, user_city)
             if available < wanted:
                 problems.append({
-                    "name": row["name_ru"] if row else f"#{pid}",
+                    "name": name,
                     "wanted": wanted,
                     "available": available,
                 })
     return problems if problems else None
 
 
-async def reserve_stock_for_order(conn, order_id: int, items_str: str) -> None:
-    """Резервирует stock при оформлении заказа (уменьшает products.stock)."""
+async def reserve_stock_for_order(conn, order_id: int, items_str: str, city_key: str | None = None) -> None:
+    """Резервирует stock при оформлении заказа (уменьшает пул города)."""
     for part in items_str.split(","):
         pid_str, qty_str = part.split(":")
         pid, qty = int(pid_str), int(qty_str)
-        await conn.execute(
-            "UPDATE products SET stock = GREATEST(stock - $1, 0) WHERE id=$2",
-            qty, pid
-        )
+        await update_stock_for_city(conn, pid, city_key, -qty)
         await conn.execute("""
-            INSERT INTO reserved_stock (order_id, product_id, quantity)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = EXCLUDED.quantity
-        """, order_id, pid, qty)
+            INSERT INTO reserved_stock (order_id, product_id, quantity, city_key)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (order_id, product_id) DO UPDATE
+            SET quantity = EXCLUDED.quantity, city_key = EXCLUDED.city_key
+        """, order_id, pid, qty, city_key)
 
 
-async def release_reserved_stock(conn, order_id: int) -> None:
+async def release_reserved_stock(conn, order_id: int, city_key: str | None = None) -> None:
     """Возвращает зарезервированный stock при отмене заказа."""
     rows = await conn.fetch(
-        "SELECT product_id, quantity FROM reserved_stock WHERE order_id=$1", order_id
+        "SELECT product_id, quantity, city_key FROM reserved_stock WHERE order_id=$1", order_id
     )
     for row in rows:
-        await conn.execute(
-            "UPDATE products SET stock = stock + $1 WHERE id=$2",
-            row["quantity"], row["product_id"]
-        )
+        # Используем city_key из записи резерва (он был зафиксирован при оформлении)
+        ck = row["city_key"] if row["city_key"] is not None else city_key
+        await update_stock_for_city(conn, row["product_id"], ck, row["quantity"])
     await conn.execute("DELETE FROM reserved_stock WHERE order_id=$1", order_id)
 
 
@@ -4692,8 +4690,8 @@ async def confirm_cash(call):
             RETURNING id
         """, uid, items_str, total, "cash", discount, resolved_city)
 
-        # Резервируем stock
-        await reserve_stock_for_order(conn, order_id, items_str)
+        # Резервируем stock по городу пользователя
+        await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
 
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
@@ -4749,8 +4747,8 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
             VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
             RETURNING id
         """, uid, items_str, eur_total, payment, discount, is_delivery, resolved_city)
-        # Резервируем stock
-        await reserve_stock_for_order(conn, order_id, items_str)
+        # Резервируем stock по городу пользователя
+        await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
     return order_id, resolved_city
@@ -5308,7 +5306,7 @@ async def promo_cmd(message: types.Message):
 @dp.message_handler(commands=["createpromo"])
 async def createpromo_cmd(message: types.Message):
     """/createpromo discount СУММА КОЛИЧЕСТВО  |  /createpromo freejar КОЛИЧЕСТВО"""
-    if not is_admin(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     uid = message.from_user.id
@@ -5362,7 +5360,7 @@ async def createpromo_cmd(message: types.Message):
 
 @dp.message_handler(commands=["testprice"])
 async def testprice(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     uid = message.from_user.id
@@ -5399,7 +5397,7 @@ async def testprice(message: types.Message):
         "Для сброса: /testprice reset"
     )
 async def freezestreak(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     async with pool.acquire() as conn:
@@ -5420,7 +5418,7 @@ async def freezestreak(message: types.Message):
 
 @dp.message_handler(commands=["unfreezestreak"])
 async def unfreezestreak(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     async with pool.acquire() as conn:
@@ -5442,7 +5440,7 @@ async def unfreezestreak(message: types.Message):
 
 @dp.message_handler(commands=["givefreejar"])
 async def givefreejar(message: types.Message):
-    if not is_admin(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     uid = message.from_user.id
@@ -5485,7 +5483,7 @@ async def _resolve_user(arg: str):
 
 
 async def _handle_ban_command(message: types.Message, banned: bool):
-    if not is_admin(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     arg = message.get_args().strip()
@@ -5790,7 +5788,7 @@ async def _build_sales_report(date_from: date, date_to: date) -> str:
 
 @dp.message_handler(commands=["sales"])
 async def sales_cmd(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         return
 
     today = date.today()
@@ -5809,7 +5807,7 @@ async def sales_cmd(message: types.Message, state: FSMContext):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("sales_"), state="*")
 async def sales_period(call: types.CallbackQuery, state: FSMContext):
-    if not is_admin(call.from_user.id):
+    if not is_super_admin(call.from_user.id):
         return
 
     await call.answer()
@@ -5843,7 +5841,7 @@ async def sales_period(call: types.CallbackQuery, state: FSMContext):
 
 @dp.message_handler(state=SalesState.waiting_date_range)
 async def sales_custom_dates(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
+    if not is_super_admin(message.from_user.id):
         await state.finish()
         return
 
