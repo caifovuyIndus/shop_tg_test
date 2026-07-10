@@ -381,6 +381,23 @@ async def init_db():
                                    ELSE products.image END
             """, *row)
 
+        # position — порядковый номер товара внутри категории (1, 2, 3...).
+        # Позволяет использовать /addstock elfworld 1 вместо реального id из БД.
+        # Перезаписывается при каждом старте, чтобы учитывать новые товары.
+        await conn.execute("""
+            ALTER TABLE products
+            ADD COLUMN IF NOT EXISTS position INTEGER DEFAULT 0
+        """)
+        await conn.execute("""
+            UPDATE products p
+            SET position = sub.rn
+            FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY id) AS rn
+                FROM products
+            ) sub
+            WHERE p.id = sub.id
+        """)
+
 # ========== ТОВАРЫ ==========
 
 products = [
@@ -5100,20 +5117,25 @@ VALID_CATEGORIES = ("elfliq", "elfworld")
 
 async def _resolve_stock_targets(conn, category: str, target: str) -> list[int]:
     """
-    Разбирает target ('all' или '1,2,3') и возвращает список product_id.
+    Разбирает target ('all' или '1,2,3') и возвращает список реальных product_id.
+    Числа трактуются как position внутри категории (1, 2, 3...), а не как id.
     """
     if target == "all":
         rows = await conn.fetch(
-            "SELECT id FROM products WHERE category=$1", category
+            "SELECT id FROM products WHERE category=$1 ORDER BY position", category
         )
         return [r["id"] for r in rows]
-    ids = []
+    positions = []
     for part in target.split(","):
         part = part.strip()
         if not part.isdigit():
             return []
-        ids.append(int(part))
-    return ids
+        positions.append(int(part))
+    rows = await conn.fetch(
+        "SELECT id FROM products WHERE category=$1 AND position = ANY($2::int[])",
+        category, positions
+    )
+    return [r["id"] for r in rows]
 
 
 @dp.message_handler(commands=["addstock"])
