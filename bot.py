@@ -3,7 +3,7 @@ import psycopg2
 import os
 import asyncio
 import asyncpg
-import random  
+import random
 import aiohttp
 from datetime import date, timedelta, datetime
 from urllib.parse import quote
@@ -300,6 +300,34 @@ async def init_db():
             admin_message_ids TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+        """)
+
+        # ========== ПРОМОКОДЫ ==========
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS promocodes (
+            code TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            discount REAL DEFAULT 0,
+            used BOOLEAN DEFAULT false,
+            used_by BIGINT DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        # Скидка от промокода, хранится у пользователя пока не применена
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS promo_discount REAL DEFAULT 0
+        """)
+        # Код промокода, который активировал пользователь (для отображения)
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS promo_code TEXT DEFAULT NULL
+        """)
+        # Тип промокода: 'discount' или 'free_jar'
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS promo_type TEXT DEFAULT NULL
         """)
         
         count = await conn.fetchval("SELECT COUNT(*) FROM products WHERE category='elfliq'")
@@ -703,6 +731,18 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено колёс: {count}",
         "stats_invited": "👥 Приглашено пользователей: {count}",
         "stats_total_spent": "💰 Всего потрачено: {value}€",
+        "promo_activated_discount": "🎉 Промокод активирован!\n\nСкидка -{value}€ добавлена к твоему заказу.",
+        "promo_activated_free_jar": "🎉 Промокод активирован!\n\nТебе начислена бесплатная банка — выбери её в магазине.",
+        "promo_not_found": "❌ Промокод не найден или уже использован.",
+        "promo_already_have": "⚠️ У тебя уже есть активный промокод.",
+        "promo_usage": "Использование: /promo КОД",
+        "promo_in_shop_label": "🎉 У тебя активирован промокод на {value}€",
+        "promo_in_profile_discount": "🎟 Промокод: {code} (-{value}€)",
+        "promo_in_profile_free_jar": "🎟 Промокод: {code} (бесплатная банка)",
+        "shop_btn": "🛒 Магазин",
+        "gift_shop_btn": "🎁 Получить бесплатную банку",
+        "createpromo_usage": "Использование:\n/createpromo discount СУММА КОЛИЧЕСТВО\n/createpromo freejar КОЛИЧЕСТВО",
+        "createpromo_done": "✅ Создано {count} промокодов:\n{codes}",
         "pay_usdt_btn": "💵 USDT (TRC20)",
         "pay_card_btn": "💳 Банковская карта",
         "pay_currency_title": "💳 Выбери валюту оплаты:",
@@ -881,6 +921,18 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено коліс: {count}",
         "stats_invited": "👥 Запрошено користувачів: {count}",
         "stats_total_spent": "💰 Всього витрачено: {value}€",
+        "promo_activated_discount": "🎉 Промокод активовано!\n\nЗнижку -{value}€ додано до твого замовлення.",
+        "promo_activated_free_jar": "🎉 Промокод активовано!\n\nТобі нарахована безкоштовна банка — обери її в магазині.",
+        "promo_not_found": "❌ Промокод не знайдено або вже використано.",
+        "promo_already_have": "⚠️ У тебе вже є активний промокод.",
+        "promo_usage": "Використання: /promo КОД",
+        "promo_in_shop_label": "🎉 У тебе активовано промокод на {value}€",
+        "promo_in_profile_discount": "🎟 Промокод: {code} (-{value}€)",
+        "promo_in_profile_free_jar": "🎟 Промокод: {code} (безкоштовна банка)",
+        "shop_btn": "🛒 Магазин",
+        "gift_shop_btn": "🎁 Отримати безкоштовну банку",
+        "createpromo_usage": "Використання:\n/createpromo discount СУМА КІЛЬКІСТЬ\n/createpromo freejar КІЛЬКІСТЬ",
+        "createpromo_done": "✅ Створено {count} промокодів:\n{codes}",
         "pay_usdt_btn": "💵 USDT (TRC20)",
         "pay_card_btn": "💳 Банківська карта",
         "pay_currency_title": "💳 Оберіть валюту оплати:",
@@ -1059,6 +1111,18 @@ TEXTS = {
         "stats_spins": "🎰 Gedrehte Räder: {count}",
         "stats_invited": "👥 Eingeladene Nutzer: {count}",
         "stats_total_spent": "💰 Insgesamt ausgegeben: {value}€",
+        "promo_activated_discount": "🎉 Promocode aktiviert!\n\nRabatt von -{value}€ wurde deiner Bestellung hinzugefügt.",
+        "promo_activated_free_jar": "🎉 Promocode aktiviert!\n\nDu erhältst eine Gratis-Dose — wähle sie im Shop aus.",
+        "promo_not_found": "❌ Promocode nicht gefunden oder bereits verwendet.",
+        "promo_already_have": "⚠️ Du hast bereits einen aktiven Promocode.",
+        "promo_usage": "Verwendung: /promo CODE",
+        "promo_in_shop_label": "🎉 Du hast einen aktiven Promocode über {value}€",
+        "promo_in_profile_discount": "🎟 Promocode: {code} (-{value}€)",
+        "promo_in_profile_free_jar": "🎟 Promocode: {code} (Gratis-Dose)",
+        "shop_btn": "🛒 Shop",
+        "gift_shop_btn": "🎁 Gratis-Dose erhalten",
+        "createpromo_usage": "Verwendung:\n/createpromo discount BETRAG ANZAHL\n/createpromo freejar ANZAHL",
+        "createpromo_done": "✅ {count} Promocodes erstellt:\n{codes}",
         "pay_usdt_btn": "💵 USDT (TRC20)",
         "pay_card_btn": "💳 Bankkarte",
         "pay_currency_title": "💳 Zahlungswährung wählen:",
@@ -1224,7 +1288,7 @@ async def _run_roulette_animation(call, winning_prize: dict, spinning_label: str
 async def get_user_discounts(uid):
     async with pool.acquire() as conn:
         user = await conn.fetchrow("""
-            SELECT total_items, referrals, current_discount, ref_bonus
+            SELECT total_items, referrals, current_discount, ref_bonus, promo_discount
             FROM users WHERE user_id=$1
         """, uid)
 
@@ -1236,6 +1300,7 @@ async def get_user_discounts(uid):
     refs = user["referrals"]
     wheel_discount = user["current_discount"]
     ref_bonus = user["ref_bonus"] or 0
+    promo_discount = user["promo_discount"] or 0
 
     discounts = []
 
@@ -1259,6 +1324,15 @@ async def get_user_discounts(uid):
         discounts.append({
             "type": "wheel",
             "value": wheel_discount,
+            "apply_to": "all",
+            "one_time": True
+        })
+
+    # PROMO — скидка от промокода, суммируется с остальными, действует на весь заказ
+    if promo_discount > 0:
+        discounts.append({
+            "type": "promo",
+            "value": promo_discount,
             "apply_to": "all",
             "one_time": True
         })
@@ -1742,7 +1816,8 @@ async def render_profile(target):
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT total_items, total_orders, total_saved, delivery_saved
+            SELECT total_items, total_orders, total_saved, delivery_saved,
+                   promo_discount, promo_code, promo_type
             FROM users WHERE user_id=$1
         """, uid)
 
@@ -1750,6 +1825,9 @@ async def render_profile(target):
     orders = row["total_orders"] or 0
     saved = row["total_saved"] or 0
     has_delivery = bool(row["delivery_saved"])
+    promo_discount = row["promo_discount"] or 0
+    promo_code = row["promo_code"]
+    promo_type = row["promo_type"]
 
     lang = await get_lang(uid)
     rank = get_rank(items)
@@ -1763,8 +1841,19 @@ async def render_profile(target):
         f"📦 {await t(uid,'profile_items')}: {items}\n"
         f"🧾 {await t(uid,'profile_orders')}: {orders}\n"
         f"💸 {await t(uid,'profile_saved')}: {saved:.2f}€\n"
-        f"\n💸 {await t(uid,'profile_discount')}: {total_discount}€"
     )
+
+    # Строка о промокоде в профиле
+    if promo_code and promo_type == "discount" and promo_discount > 0:
+        text += "\n" + (await t(uid, "promo_in_profile_discount")).format(
+            code=promo_code, value=promo_discount
+        ) + "\n"
+    elif promo_code and promo_type == "free_jar":
+        text += "\n" + (await t(uid, "promo_in_profile_free_jar")).format(
+            code=promo_code
+        ) + "\n"
+
+    text += f"\n💸 {await t(uid,'profile_discount')}: {total_discount}€"
 
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -3262,6 +3351,13 @@ async def render_category_shop(target, uid, category):
     text += await t(uid, "choose_product") + "\n\n"
 
     if discount > 0:
+        # Строка о промокоде — выше строки скидки, только если есть promo_discount
+        async with pool.acquire() as conn:
+            promo_discount = await conn.fetchval(
+                "SELECT promo_discount FROM users WHERE user_id=$1", uid
+            ) or 0
+        if promo_discount > 0:
+            text += (await t(uid, "promo_in_shop_label")).format(value=promo_discount) + "\n"
         text += f"💰 {base_price}€ → {final_price}€ (-{discount}€)\n\n"
     else:
         text += f"💰 {base_price}€\n\n"
@@ -4385,12 +4481,15 @@ async def admin_confirm(call):
                 except Exception:
                     pass
 
-        #    одноразовые бонусы (скидка с рулетки, реферальная, новичка) ──
+        #    одноразовые бонусы (скидка с рулетки, реферальная, новичка, промокод) ──
         await conn.execute("""
             UPDATE users 
             SET current_discount = 0,
                 referrals = 0,
                 ref_bonus = 0,
+                promo_discount = 0,
+                promo_code = NULL,
+                promo_type = NULL,
                 total_saved = total_saved + $1,
                 total_spent = total_spent + $2,
                 streak_weeks = $3,
@@ -4442,7 +4541,138 @@ async def admin_cancel(call):
         status_others=f"\n\n❌ ОТМЕНЕНО @{admin_username}"
     )
 
-# ========== АДМИН-КОМАНДЫ ==========
+# ========== ПРОМОКОДЫ ==========
+
+import string as _string
+
+def _generate_code(length=8) -> str:
+    """Генерирует случайный промокод из заглавных букв и цифр."""
+    alphabet = _string.ascii_uppercase + _string.digits
+    return "".join(random.choices(alphabet, k=length))
+
+
+@dp.message_handler(commands=["promo"])
+async def promo_cmd(message: types.Message):
+    """Пользователь активирует промокод: /promo КОД"""
+    uid = message.from_user.id
+    args = message.get_args().strip()
+
+    if not args:
+        await message.answer(await t(uid, "promo_usage"))
+        return
+
+    code = args.upper()
+
+    async with pool.acquire() as conn:
+        # Проверяем есть ли у пользователя активный промокод
+        user_row = await conn.fetchrow(
+            "SELECT promo_code, promo_discount, free_jar_bonus FROM users WHERE user_id=$1", uid
+        )
+        if user_row and (user_row["promo_code"] or (user_row["free_jar_bonus"] or 0) > 0):
+            await message.answer(await t(uid, "promo_already_have"))
+            return
+
+        # Ищем промокод
+        promo = await conn.fetchrow(
+            "SELECT * FROM promocodes WHERE code=$1 AND used=false", code
+        )
+
+    if not promo:
+        await message.answer(await t(uid, "promo_not_found"))
+        return
+
+    # Активируем
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval("""
+            UPDATE promocodes SET used=true, used_by=$1
+            WHERE code=$2 AND used=false
+            RETURNING code
+        """, uid, code)
+
+    if not updated:
+        # Гонка — кто-то успел раньше
+        await message.answer(await t(uid, "promo_not_found"))
+        return
+
+    if promo["type"] == "discount":
+        discount_val = promo["discount"]
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET promo_discount=$1, promo_code=$2, promo_type='discount'
+                WHERE user_id=$3
+            """, discount_val, code, uid)
+
+        text = (await t(uid, "promo_activated_discount")).format(value=discount_val)
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton(await t(uid, "shop_btn"), callback_data="back_shop"))
+        await message.answer(text, reply_markup=kb)
+
+    elif promo["type"] == "free_jar":
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET free_jar_bonus=1, promo_code=$1, promo_type='free_jar'
+                WHERE user_id=$2
+            """, code, uid)
+
+        text = await t(uid, "promo_activated_free_jar")
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton(await t(uid, "gift_shop_btn"), callback_data="open_gift_shop"))
+        await message.answer(text, reply_markup=kb)
+
+
+@dp.message_handler(commands=["createpromo"])
+async def createpromo_cmd(message: types.Message):
+    """/createpromo discount СУММА КОЛИЧЕСТВО  |  /createpromo freejar КОЛИЧЕСТВО"""
+    if not is_admin(message.from_user.id):
+        return
+
+    uid = message.from_user.id
+    args = message.get_args().split()
+
+    if not args:
+        await message.answer(await t(uid, "createpromo_usage"))
+        return
+
+    promo_type = args[0].lower()
+
+    try:
+        if promo_type == "discount":
+            if len(args) < 3:
+                await message.answer(await t(uid, "createpromo_usage"))
+                return
+            discount_val = float(args[1])
+            count = int(args[2])
+
+        elif promo_type == "freejar":
+            if len(args) < 2:
+                await message.answer(await t(uid, "createpromo_usage"))
+                return
+            discount_val = 0
+            count = int(args[1])
+        else:
+            await message.answer(await t(uid, "createpromo_usage"))
+            return
+    except (ValueError, IndexError):
+        await message.answer(await t(uid, "createpromo_usage"))
+        return
+
+    db_type = "discount" if promo_type == "discount" else "free_jar"
+    codes = []
+    async with pool.acquire() as conn:
+        for _ in range(count):
+            code = _generate_code()
+            # Гарантируем уникальность
+            while await conn.fetchval("SELECT 1 FROM promocodes WHERE code=$1", code):
+                code = _generate_code()
+            await conn.execute(
+                "INSERT INTO promocodes (code, type, discount) VALUES ($1, $2, $3)",
+                code, db_type, discount_val
+            )
+            codes.append(code)
+
+    codes_text = "\n".join(f"• `{c}`" for c in codes)
+    reply = (await t(uid, "createpromo_done")).format(count=count, codes=codes_text)
+    await message.answer(reply, parse_mode="HTML")
 
 
 @dp.message_handler(commands=["testprice"])
