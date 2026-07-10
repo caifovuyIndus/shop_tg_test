@@ -302,7 +302,22 @@ async def init_db():
         )
         """)
 
-        # ========== ПРОМОКОДЫ ==========
+        # ========== УПРАВЛЕНИЕ ОСТАТКАМИ ==========
+        # stock — фактическое количество товара в наличии
+        await conn.execute("""
+            ALTER TABLE products
+            ADD COLUMN IF NOT EXISTS stock INTEGER DEFAULT 0
+        """)
+        # Временный резерв: при оформлении заказа уменьшаем stock,
+        # при подтверждении — окончательно; при отмене — возвращаем
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS reserved_stock (
+            order_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            PRIMARY KEY (order_id, product_id)
+        )
+        """)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS promocodes (
             code TEXT PRIMARY KEY,
@@ -365,24 +380,6 @@ async def init_db():
                     image   = CASE WHEN EXCLUDED.image <> '' THEN EXCLUDED.image
                                    ELSE products.image END
             """, *row)
-
-        # Колонка position: порядковый номер товара внутри категории (1, 2, 3...).
-        # Позволяет использовать /stock elfworld 1 вместо реального id из БД.
-        await conn.execute("""
-            ALTER TABLE products
-            ADD COLUMN IF NOT EXISTS position INTEGER DEFAULT 0
-        """)
-        # Проставляем position для всех товаров (в т.ч. уже существующих).
-        # Нумерация начинается с 1 внутри каждой категории, по порядку id.
-        await conn.execute("""
-            UPDATE products p
-            SET position = sub.rn
-            FROM (
-                SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY id) AS rn
-                FROM products
-            ) sub
-            WHERE p.id = sub.id
-        """)
 
 # ========== ТОВАРЫ ==========
 
@@ -749,6 +746,13 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено колёс: {count}",
         "stats_invited": "👥 Приглашено пользователей: {count}",
         "stats_total_spent": "💰 Всего потрачено: {value}€",
+        "stock_out": "❌ К сожалению, товара {name} больше нет в наличии.\n\nУдалите его из корзины или выберите другой вкус.",
+        "stock_low": "❌ К сожалению, товара {name} осталось всего {qty} шт.",
+        "stock_low_cart": "❌ К сожалению, товара {name} осталось всего {qty} шт.\n\nПожалуйста, уменьшите количество или выберите другой вкус.",
+        "addstock_usage": "Использование:\n/addstock <elfliq|elfworld> <all|N[,N,...]> <кол-во>",
+        "removestock_usage": "Использование:\n/removestock <elfliq|elfworld> <all|N[,N,...]> <кол-во>",
+        "setstock_usage": "Использование:\n/setstock <elfliq|elfworld> <N[,N,...]> <кол-во>",
+        "stock_updated": "✅ Обновлено {count} товар(ов)",
         "promo_activated_discount": "🎉 Промокод активирован!\n\nСкидка -{value}€ добавлена к твоему заказу.",
         "promo_activated_free_jar": "🎉 Промокод активирован!\n\nТебе начислена бесплатная банка — выбери её в магазине.",
         "promo_not_found": "❌ Промокод не найден или уже использован.",
@@ -939,6 +943,13 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено коліс: {count}",
         "stats_invited": "👥 Запрошено користувачів: {count}",
         "stats_total_spent": "💰 Всього витрачено: {value}€",
+        "stock_out": "❌ На жаль, товару {name} більше немає в наявності.\n\nВидаліть його з кошика або оберіть інший смак.",
+        "stock_low": "❌ На жаль, товару {name} залишилось лише {qty} шт.",
+        "stock_low_cart": "❌ На жаль, товару {name} залишилось лише {qty} шт.\n\nБудь ласка, зменшіть кількість або оберіть інший смак.",
+        "addstock_usage": "Використання:\n/addstock <elfliq|elfworld> <all|N[,N,...]> <кількість>",
+        "removestock_usage": "Використання:\n/removestock <elfliq|elfworld> <all|N[,N,...]> <кількість>",
+        "setstock_usage": "Використання:\n/setstock <elfliq|elfworld> <N[,N,...]> <кількість>",
+        "stock_updated": "✅ Оновлено {count} товар(ів)",
         "promo_activated_discount": "🎉 Промокод активовано!\n\nЗнижку -{value}€ додано до твого замовлення.",
         "promo_activated_free_jar": "🎉 Промокод активовано!\n\nТобі нарахована безкоштовна банка — обери її в магазині.",
         "promo_not_found": "❌ Промокод не знайдено або вже використано.",
@@ -1129,6 +1140,13 @@ TEXTS = {
         "stats_spins": "🎰 Gedrehte Räder: {count}",
         "stats_invited": "👥 Eingeladene Nutzer: {count}",
         "stats_total_spent": "💰 Insgesamt ausgegeben: {value}€",
+        "stock_out": "❌ Leider ist {name} nicht mehr vorrätig.\n\nBitte entferne es aus dem Warenkorb oder wähle eine andere Sorte.",
+        "stock_low": "❌ Leider sind nur noch {qty} Stück von {name} verfügbar.",
+        "stock_low_cart": "❌ Leider sind nur noch {qty} Stück von {name} verfügbar.\n\nBitte reduziere die Menge oder wähle eine andere Sorte.",
+        "addstock_usage": "Verwendung:\n/addstock <elfliq|elfworld> <all|N[,N,...]> <Menge>",
+        "removestock_usage": "Verwendung:\n/removestock <elfliq|elfworld> <all|N[,N,...]> <Menge>",
+        "setstock_usage": "Verwendung:\n/setstock <elfliq|elfworld> <N[,N,...]> <Menge>",
+        "stock_updated": "✅ {count} Produkt(e) aktualisiert",
         "promo_activated_discount": "🎉 Promocode aktiviert!\n\nRabatt von -{value}€ wurde deiner Bestellung hinzugefügt.",
         "promo_activated_free_jar": "🎉 Promocode aktiviert!\n\nDu erhältst eine Gratis-Dose — wähle sie im Shop aus.",
         "promo_not_found": "❌ Promocode nicht gefunden oder bereits verwendet.",
@@ -2887,10 +2905,18 @@ async def gift_confirm(call):
         await call.answer(await t(uid, "gift_already_used"), show_alert=True)
         return
 
+    # Проверяем наличие выбранного товара
     async with pool.acquire() as conn:
         p = await conn.fetchrow(
-            "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
+            "SELECT name_ru, name_ua, name_de, stock FROM products WHERE id=$1", pid
         )
+
+    if not p or p["stock"] <= 0:
+        await call.answer(
+            (await t(uid, "stock_out")).format(name=p["name_ru"] if p else f"#{pid}"),
+            show_alert=True
+        )
+        return
 
     lang = await get_lang(uid)
     name = p[f"name_{lang}"]
@@ -2928,10 +2954,18 @@ async def gift_delivery_confirm(call):
         await call.answer(await t(uid, "gift_already_used"), show_alert=True)
         return
 
+    # Проверяем наличие выбранного товара
     async with pool.acquire() as conn:
         p = await conn.fetchrow(
-            "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
+            "SELECT name_ru, name_ua, name_de, stock FROM products WHERE id=$1", pid
         )
+
+    if not p or p["stock"] <= 0:
+        await call.answer(
+            (await t(uid, "stock_out")).format(name=p["name_ru"] if p else f"#{pid}"),
+            show_alert=True
+        )
+        return
 
     lang = await get_lang(uid)
     name = p[f"name_{lang}"]
@@ -2959,8 +2993,18 @@ async def gift_apply(call):
     pid = int(call.data.split("_")[2])
     username = call.from_user.username or "unknown"
 
+    # Финальная проверка наличия перед списанием
     async with pool.acquire() as conn:
-        # Атомарное списание
+        stock_row = await conn.fetchrow("SELECT name_ru, stock FROM products WHERE id=$1", pid)
+    if not stock_row or stock_row["stock"] <= 0:
+        await call.answer(
+            (await t(uid, "stock_out")).format(name=stock_row["name_ru"] if stock_row else f"#{pid}"),
+            show_alert=True
+        )
+        return
+
+    async with pool.acquire() as conn:
+        # Атомарное списание bonus
         updated = await conn.fetchval("""
             UPDATE users
             SET free_jar_bonus = 0
@@ -2981,13 +3025,22 @@ async def gift_apply(call):
     lang = await get_lang(uid)
     name = p[f"name_{lang}"]
 
-    # Создаём запись заявки (без request_id пока)
+    # Создаём заявку и резервируем stock
     async with pool.acquire() as conn:
         request_id = await conn.fetchval("""
             INSERT INTO gift_requests (user_id, product_id, username)
             VALUES ($1, $2, $3)
             RETURNING id
         """, uid, pid, username)
+        # Резервируем 1 единицу товара
+        await conn.execute(
+            "UPDATE products SET stock = GREATEST(stock - 1, 0) WHERE id=$1", pid
+        )
+        await conn.execute("""
+            INSERT INTO reserved_stock (order_id, product_id, quantity)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = 1
+        """, -request_id, pid)  # отрицательный id чтобы не конфликтовать с orders
 
     admin_text = (
         f"🎁 Бесплатная банка\n\n"
@@ -3031,6 +3084,16 @@ async def gift_delivery_apply(call):
     pid = int(call.data.split("gift_delivery_apply_")[1])
     username = call.from_user.username or "unknown"
 
+    # Финальная проверка наличия
+    async with pool.acquire() as conn:
+        stock_row = await conn.fetchrow("SELECT name_ru, stock FROM products WHERE id=$1", pid)
+    if not stock_row or stock_row["stock"] <= 0:
+        await call.answer(
+            (await t(uid, "stock_out")).format(name=stock_row["name_ru"] if stock_row else f"#{pid}"),
+            show_alert=True
+        )
+        return
+
     async with pool.acquire() as conn:
         updated = await conn.fetchval("""
             UPDATE users
@@ -3058,6 +3121,15 @@ async def gift_delivery_apply(call):
             VALUES ($1, $2, $3)
             RETURNING id
         """, uid, pid, username)
+        # Резервируем 1 единицу товара
+        await conn.execute(
+            "UPDATE products SET stock = GREATEST(stock - 1, 0) WHERE id=$1", pid
+        )
+        await conn.execute("""
+            INSERT INTO reserved_stock (order_id, product_id, quantity)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = 1
+        """, -request_id, pid)
 
     # Блок данных доставки для администратора
     delivery_block = await _build_delivery_admin_block(uid)
@@ -3158,6 +3230,8 @@ async def gift_issued(call):
         await conn.execute(
             "UPDATE gift_requests SET status='issued' WHERE id=$1", request_id
         )
+        # Финализируем резерв (stock уже уменьшен при оформлении)
+        await finalize_reserved_stock(conn, -request_id)
 
     await call.answer("✅ Выдано")
 
@@ -3188,6 +3262,8 @@ async def gift_rejected(call):
         await conn.execute(
             "UPDATE gift_requests SET status='rejected' WHERE id=$1", request_id
         )
+        # Возвращаем зарезервированный stock
+        await release_reserved_stock(conn, -request_id)
 
     # Бонус НЕ возвращается — по ТЗ
     await call.answer("❌ Отменено")
@@ -3393,15 +3469,15 @@ async def render_category_shop(target, uid, category):
     for p in products:
         pid = p["id"]
         name = p[f"name_{lang}"]
-        stock = p["in_stock"]
+        stock = p["stock"] if p["stock"] is not None else 0
 
         fav = await is_fav(uid, pid)
         heart = "❤️" if fav else ""
 
-        status = "✅" if stock else "❌"
+        status = "✅" if stock > 0 else "❌"
         text += f"{name} {status} {heart}\n"
 
-        if stock:
+        if stock > 0:
             kb.add(InlineKeyboardButton(name, callback_data=f"view_{pid}"))
 
     other_category = "elfworld" if category == "elfliq" else "elfliq"
@@ -3581,6 +3657,31 @@ async def add(call):
             WHERE user_id=$1 AND product_id=$2
         """, uid, pid)
 
+        # Проверяем что в наличии хватает на текущее кол-во + 1
+        product_row = await conn.fetchrow(
+            "SELECT name_ru, stock FROM products WHERE id=$1", pid
+        )
+        available = product_row["stock"] if product_row else 0
+        current_in_cart = 0
+        if exists:
+            current_in_cart = await conn.fetchval(
+                "SELECT quantity FROM cart WHERE user_id=$1 AND product_id=$2", uid, pid
+            ) or 0
+        if current_in_cart + 1 > available:
+            if available == 0:
+                await call.answer(
+                    (await t(uid, "stock_out")).format(name=product_row["name_ru"]),
+                    show_alert=True
+                )
+            else:
+                await call.answer(
+                    (await t(uid, "stock_low")).format(
+                        name=product_row["name_ru"], qty=available
+                    ),
+                    show_alert=True
+                )
+            return
+
         if exists:
             await conn.execute("""
                 UPDATE cart
@@ -3693,6 +3794,29 @@ async def cart_plus(call):
     pid = int(call.data.split("_")[2])
 
     async with pool.acquire() as conn:
+        current_qty = await conn.fetchval(
+            "SELECT quantity FROM cart WHERE user_id=$1 AND product_id=$2", uid, pid
+        ) or 0
+        product_row = await conn.fetchrow(
+            "SELECT name_ru, stock FROM products WHERE id=$1", pid
+        )
+        available = product_row["stock"] if product_row else 0
+
+        if current_qty + 1 > available:
+            if available == 0:
+                await call.answer(
+                    (await t(uid, "stock_out")).format(name=product_row["name_ru"]),
+                    show_alert=True
+                )
+            else:
+                await call.answer(
+                    (await t(uid, "stock_low")).format(
+                        name=product_row["name_ru"], qty=available
+                    ),
+                    show_alert=True
+                )
+            return
+
         await conn.execute("""
             UPDATE cart
             SET quantity = quantity + 1
@@ -3990,6 +4114,12 @@ async def delivery_refill_gift(call):
 async def pay(call):
     uid = call.from_user.id
 
+    # Проверяем наличие перед переходом к оплате
+    problems = await check_cart_stock(uid)
+    if problems:
+        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
+        return
+
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
@@ -4053,6 +4183,81 @@ async def _build_delivery_admin_block(uid: int) -> str:
 
 
 
+async def check_cart_stock(uid: int) -> list[dict] | None:
+    """
+    Проверяет наличие всех товаров в корзине пользователя.
+    Возвращает список проблем: [{"name": ..., "wanted": N, "available": M}] или None если всё OK.
+    """
+    async with pool.acquire() as conn:
+        cart_items = await conn.fetch(
+            "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
+        )
+        if not cart_items:
+            return None
+        problems = []
+        for item in cart_items:
+            pid = item["product_id"]
+            wanted = item["quantity"]
+            row = await conn.fetchrow(
+                "SELECT name_ru, stock FROM products WHERE id=$1", pid
+            )
+            available = row["stock"] if row else 0
+            if available < wanted:
+                problems.append({
+                    "name": row["name_ru"] if row else f"#{pid}",
+                    "wanted": wanted,
+                    "available": available,
+                })
+    return problems if problems else None
+
+
+async def reserve_stock_for_order(conn, order_id: int, items_str: str) -> None:
+    """Резервирует stock при оформлении заказа (уменьшает products.stock)."""
+    for part in items_str.split(","):
+        pid_str, qty_str = part.split(":")
+        pid, qty = int(pid_str), int(qty_str)
+        await conn.execute(
+            "UPDATE products SET stock = GREATEST(stock - $1, 0) WHERE id=$2",
+            qty, pid
+        )
+        await conn.execute("""
+            INSERT INTO reserved_stock (order_id, product_id, quantity)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = EXCLUDED.quantity
+        """, order_id, pid, qty)
+
+
+async def release_reserved_stock(conn, order_id: int) -> None:
+    """Возвращает зарезервированный stock при отмене заказа."""
+    rows = await conn.fetch(
+        "SELECT product_id, quantity FROM reserved_stock WHERE order_id=$1", order_id
+    )
+    for row in rows:
+        await conn.execute(
+            "UPDATE products SET stock = stock + $1 WHERE id=$2",
+            row["quantity"], row["product_id"]
+        )
+    await conn.execute("DELETE FROM reserved_stock WHERE order_id=$1", order_id)
+
+
+async def finalize_reserved_stock(conn, order_id: int) -> None:
+    """При подтверждении заказа просто удаляем резерв (stock уже уменьшен)."""
+    await conn.execute("DELETE FROM reserved_stock WHERE order_id=$1", order_id)
+
+
+async def _format_stock_errors(uid: int, problems: list[dict]) -> str:
+    """Форматирует список проблем с наличием в текст для пользователя."""
+    lines = []
+    for p in problems:
+        if p["available"] == 0:
+            lines.append((await t(uid, "stock_out")).format(name=p["name"]))
+        else:
+            lines.append((await t(uid, "stock_low_cart")).format(
+                name=p["name"], qty=p["available"]
+            ))
+    return "\n\n".join(lines)
+
+
 @dp.callback_query_handler(lambda c: c.data == "confirm_cash")
 async def confirm_cash(call):
     if not await check_not_banned(call):
@@ -4060,6 +4265,12 @@ async def confirm_cash(call):
 
     uid = call.from_user.id
     username = call.from_user.username or "нет username"
+
+    # Проверяем наличие перед оформлением
+    problems = await check_cart_stock(uid)
+    if problems:
+        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
+        return
 
     async with pool.acquire() as conn:
         cart_items = await conn.fetch("""
@@ -4094,9 +4305,10 @@ async def confirm_cash(call):
             RETURNING id
         """, uid, items_str, total, "cash", discount)
 
-        await conn.execute("""
-            DELETE FROM cart WHERE user_id=$1
-        """, uid)
+        # Резервируем stock
+        await reserve_stock_for_order(conn, order_id, items_str)
+
+        await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
 
     await render(call, await t(uid,"order_done"))
@@ -4151,7 +4363,7 @@ async def _get_cart_totals(uid: int):
 
 
 async def _create_pending_order(uid: int, items_str: str, eur_total: float, discount: float, payment: str) -> int:
-    """Создаёт заказ со статусом pending и очищает корзину."""
+    """Создаёт заказ со статусом pending, резервирует stock и очищает корзину."""
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
@@ -4161,6 +4373,8 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
             VALUES ($1, $2, $3, $4, $5, 'pending', $6)
             RETURNING id
         """, uid, items_str, eur_total, payment, discount, is_delivery)
+        # Резервируем stock
+        await reserve_stock_for_order(conn, order_id, items_str)
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
     return order_id
@@ -4243,6 +4457,11 @@ async def paid_usdt(call):
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
+    problems = await check_cart_stock(uid)
+    if problems:
+        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
+        return
+
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
@@ -4310,6 +4529,11 @@ async def paid_card_eur(call):
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
+    problems = await check_cart_stock(uid)
+    if problems:
+        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
+        return
+
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
@@ -4369,6 +4593,11 @@ async def paid_card_uah(call):
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
+    problems = await check_cart_stock(uid)
+    if problems:
+        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
+        return
+
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
@@ -4414,6 +4643,8 @@ async def admin_confirm(call):
         await conn.execute(
             "UPDATE orders SET status='confirmed' WHERE id=$1", order_id
         )
+        # Финализируем резерв — stock уже уменьшен при оформлении, просто чистим резерв
+        await finalize_reserved_stock(conn, order_id)
 
         old_user = await conn.fetchrow(
             "SELECT total_items, total_orders FROM users WHERE user_id=$1", user_id
@@ -4548,6 +4779,8 @@ async def admin_cancel(call):
         await conn.execute(
             "UPDATE orders SET status='cancelled' WHERE id=$1", order_id
         )
+        # Возвращаем зарезервированный stock
+        await release_reserved_stock(conn, order_id)
 
     await call.answer("Отменено")
 
@@ -4860,79 +5093,126 @@ async def unban_cmd(message: types.Message):
     await _handle_ban_command(message, banned=False)
 
 
-# ========== УПРАВЛЕНИЕ НАЛИЧИЕМ (/stock, /unstock) ==========
+# ========== УПРАВЛЕНИЕ НАЛИЧИЕМ ==========
 
 VALID_CATEGORIES = ("elfliq", "elfworld")
 
 
-async def _handle_stock_command(message: types.Message, in_stock: int):
+async def _resolve_stock_targets(conn, category: str, target: str) -> list[int]:
+    """
+    Разбирает target ('all' или '1,2,3') и возвращает список product_id.
+    """
+    if target == "all":
+        rows = await conn.fetch(
+            "SELECT id FROM products WHERE category=$1", category
+        )
+        return [r["id"] for r in rows]
+    ids = []
+    for part in target.split(","):
+        part = part.strip()
+        if not part.isdigit():
+            return []
+        ids.append(int(part))
+    return ids
+
+
+@dp.message_handler(commands=["addstock"])
+async def addstock_cmd(message: types.Message):
+    """/addstock <elfliq|elfworld> <all|N[,N,...]> <кол-во>"""
     if not is_admin(message.from_user.id):
         return
-
+    uid = message.from_user.id
     parts = message.text.split()
-
-    if len(parts) != 3:
-        cmd = parts[0] if parts else "/stock"
-        await message.answer(
-            f"Использование: {cmd} <Elfliq|Elfworld> <product_id|all>"
-        )
+    if len(parts) != 4:
+        await message.answer(await t(uid, "addstock_usage"))
         return
-
-    category = parts[1].lower()
-    target = parts[2].lower()
-
+    category, target, qty_str = parts[1].lower(), parts[2].lower(), parts[3]
     if category not in VALID_CATEGORIES:
-        await message.answer("❌ Неизвестный раздел. Используй Elfliq или Elfworld")
+        await message.answer(await t(uid, "addstock_usage"))
         return
-
-    section_label = category.capitalize()
-    action_label = "убраны из наличия" if in_stock == 0 else "возвращены в наличие"
-    action_label_single = "убран из наличия" if in_stock == 0 else "возвращён в наличие"
-
+    try:
+        qty = int(qty_str)
+        if qty <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(await t(uid, "addstock_usage"))
+        return
     async with pool.acquire() as conn:
-        if target == "all":
+        ids = await _resolve_stock_targets(conn, category, target)
+        if not ids:
+            await message.answer(await t(uid, "addstock_usage"))
+            return
+        for pid in ids:
             await conn.execute(
-                "UPDATE products SET in_stock=$1 WHERE category=$2",
-                in_stock, category
+                "UPDATE products SET stock = stock + $1 WHERE id=$2", qty, pid
             )
-            await message.answer(f"✅ Все товары раздела {section_label} {action_label}")
+    await message.answer((await t(uid, "stock_updated")).format(count=len(ids)))
+
+
+@dp.message_handler(commands=["removestock"])
+async def removestock_cmd(message: types.Message):
+    """/removestock <elfliq|elfworld> <all|N[,N,...]> <кол-во>"""
+    if not is_admin(message.from_user.id):
+        return
+    uid = message.from_user.id
+    parts = message.text.split()
+    if len(parts) != 4:
+        await message.answer(await t(uid, "removestock_usage"))
+        return
+    category, target, qty_str = parts[1].lower(), parts[2].lower(), parts[3]
+    if category not in VALID_CATEGORIES:
+        await message.answer(await t(uid, "removestock_usage"))
+        return
+    try:
+        qty = int(qty_str)
+        if qty <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(await t(uid, "removestock_usage"))
+        return
+    async with pool.acquire() as conn:
+        ids = await _resolve_stock_targets(conn, category, target)
+        if not ids:
+            await message.answer(await t(uid, "removestock_usage"))
             return
+        for pid in ids:
+            await conn.execute(
+                "UPDATE products SET stock = GREATEST(stock - $1, 0) WHERE id=$2", qty, pid
+            )
+    await message.answer((await t(uid, "stock_updated")).format(count=len(ids)))
 
-        try:
-            pid = int(target)
-        except ValueError:
-            await message.answer("❌ ID товара должен быть числом или 'all'")
+
+@dp.message_handler(commands=["setstock"])
+async def setstock_cmd(message: types.Message):
+    """/setstock <elfliq|elfworld> <N[,N,...]> <кол-во>"""
+    if not is_admin(message.from_user.id):
+        return
+    uid = message.from_user.id
+    parts = message.text.split()
+    if len(parts) != 4:
+        await message.answer(await t(uid, "setstock_usage"))
+        return
+    category, target, qty_str = parts[1].lower(), parts[2].lower(), parts[3]
+    if category not in VALID_CATEGORIES:
+        await message.answer(await t(uid, "setstock_usage"))
+        return
+    try:
+        qty = int(qty_str)
+        if qty < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(await t(uid, "setstock_usage"))
+        return
+    async with pool.acquire() as conn:
+        ids = await _resolve_stock_targets(conn, category, target)
+        if not ids:
+            await message.answer(await t(uid, "setstock_usage"))
             return
-
-        row = await conn.fetchrow(
-            "SELECT id, name_ru FROM products WHERE position=$1 AND category=$2",
-            pid, category
-        )
-
-        if not row:
-            await message.answer(f"❌ Товар №{pid} не найден в разделе {section_label}")
-            return
-
-        await conn.execute(
-            "UPDATE products SET in_stock=$1 WHERE id=$2",
-            in_stock, row["id"]
-        )
-
-    await message.answer(
-        f"✅ Товар №{pid} ({row['name_ru']}) {action_label_single} в разделе {section_label}"
-    )
-
-
-@dp.message_handler(commands=["stock"])
-async def stock_cmd(message: types.Message):
-    # /stock <Elfliq|Elfworld> <product_id|all> — вернуть товар(ы) в наличие
-    await _handle_stock_command(message, in_stock=1)
-
-
-@dp.message_handler(commands=["unstock"])
-async def unstock_cmd(message: types.Message):
-    # /unstock <Elfliq|Elfworld> <product_id|all> — убрать товар(ы) из наличия
-    await _handle_stock_command(message, in_stock=0)
+        for pid in ids:
+            await conn.execute(
+                "UPDATE products SET stock = $1 WHERE id=$2", qty, pid
+            )
+    await message.answer((await t(uid, "stock_updated")).format(count=len(ids)))
 
 # ========== ЗАПУСК ==========
 
