@@ -1913,11 +1913,11 @@ async def set_user_city(uid: int, city: str | None) -> None:
         )
         if city == "delivery":
             await conn.execute(
-                "UPDATE users SET delivery_mode=true WHERE user_id=$1", uid
+                "UPDATE users SET delivery_mode=1 WHERE user_id=$1", uid
             )
         else:
             await conn.execute(
-                "UPDATE users SET delivery_mode=false WHERE user_id=$1", uid
+                "UPDATE users SET delivery_mode=0 WHERE user_id=$1", uid
             )
 
 
@@ -3729,13 +3729,13 @@ async def city_select_cb(call: types.CallbackQuery, state: FSMContext):
     if choice == "delivery":
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET city='delivery', delivery_mode=true WHERE user_id=$1", uid
+                "UPDATE users SET city='delivery', delivery_mode=1 WHERE user_id=$1", uid
             )
         confirm_text = await t(uid, "city_delivery_selected")
     elif choice in CITIES:
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET city=$1, delivery_mode=false WHERE user_id=$2", choice, uid
+                "UPDATE users SET city=$1, delivery_mode=0 WHERE user_id=$2", choice, uid
             )
         confirm_text = (await t(uid, "city_selected")).format(city=CITIES[choice]["name"])
     else:
