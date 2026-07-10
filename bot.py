@@ -5236,6 +5236,249 @@ async def setstock_cmd(message: types.Message):
             )
     await message.answer((await t(uid, "stock_updated")).format(count=len(ids)))
 
+# ========== СТАТИСТИКА ПРОДАЖ (/sales) ==========
+
+class SalesState(StatesGroup):
+    waiting_date_range = State()
+
+
+def _parse_items_str(items_str: str) -> list[tuple[int, int]]:
+    """Разбирает строку 'pid:qty,pid:qty' → [(pid, qty), ...]"""
+    result = []
+    for part in (items_str or "").split(","):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        try:
+            pid, qty = part.split(":", 1)
+            result.append((int(pid), int(qty)))
+        except ValueError:
+            continue
+    return result
+
+
+async def _build_sales_report(date_from: date, date_to: date) -> str:
+    """
+    Считает продажи за период [date_from, date_to] включительно.
+    Учитывает только confirmed-заказы (не отменённые и не pending).
+    Бесплатные банки (gift_requests) не учитываются — они не проходят через orders.
+    """
+    async with pool.acquire() as conn:
+        orders = await conn.fetch("""
+            SELECT items, total, discount
+            FROM orders
+            WHERE status = 'confirmed'
+              AND DATE(created_at) >= $1
+              AND DATE(created_at) <= $2
+        """, date_from, date_to)
+
+        if not orders:
+            return f"📊 Продажи за {date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}\n\nЗаказов не найдено."
+
+        # Собираем агрегацию по product_id
+        sales: dict[int, int] = {}  # pid → total_qty
+        total_revenue = 0.0
+
+        for order in orders:
+            # total в заказе — уже итоговая сумма после скидки, это выручка
+            total_revenue += float(order["total"] or 0)
+            for pid, qty in _parse_items_str(order["items"]):
+                sales[pid] = sales.get(pid, 0) + qty
+
+        if not sales:
+            return f"📊 Продажи за {date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}\n\nДанных нет."
+
+        # Загружаем данные о товарах одним запросом
+        pids = list(sales.keys())
+        products_rows = await conn.fetch("""
+            SELECT id, name_ru, price, category
+            FROM products
+            WHERE id = ANY($1::int[])
+        """, pids)
+
+        prod_info: dict[int, dict] = {r["id"]: dict(r) for r in products_rows}
+
+        # Разбивка по категориям
+        by_category: dict[str, list[tuple[str, int, float]]] = {"elfliq": [], "elfworld": []}
+        total_jars = 0
+
+        for pid, qty in sorted(sales.items(), key=lambda x: -x[1]):
+            info = prod_info.get(pid)
+            if not info:
+                continue
+            name = info["name_ru"]
+            price = float(info["price"] or 0)
+            revenue = round(price * qty, 2)
+            cat = info["category"] or "elfliq"
+            by_category.setdefault(cat, []).append((name, qty, revenue))
+            total_jars += qty
+
+    # Формируем отчёт
+    date_label = (
+        date_from.strftime("%d.%m")
+        if date_from == date_to
+        else f"{date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}"
+    )
+    lines = [f"📊 Продажи за {date_label}\n"]
+
+    for cat_key, cat_label in [("elfliq", "🧪 ELFLIQ"), ("elfworld", "🌍 ELFWORLD")]:
+        items_in_cat = by_category.get(cat_key, [])
+        if not items_in_cat:
+            continue
+        lines.append(f"\n{cat_label}:")
+        for name, qty, rev in items_in_cat:
+            lines.append(f"  {name} — {qty} шт. — {rev:.2f}€")
+
+    lines.append(f"\n────────────────")
+    lines.append(f"Всего банок: {total_jars}")
+    lines.append(f"Выручка: {total_revenue:.2f}€")
+
+    return "\n".join(lines)
+
+
+@dp.message_handler(commands=["sales"])
+async def sales_cmd(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📅 Сегодня",       callback_data="sales_today"),
+        InlineKeyboardButton("📅 Вчера",          callback_data="sales_yesterday"),
+        InlineKeyboardButton("📅 7 дней",         callback_data="sales_7d"),
+        InlineKeyboardButton("📅 30 дней",        callback_data="sales_30d"),
+        InlineKeyboardButton("✏️ Произвольный период", callback_data="sales_custom"),
+    )
+    await message.answer("📊 Выберите период статистики:", reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("sales_"), state="*")
+async def sales_period(call: types.CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        return
+
+    await call.answer()
+    today = date.today()
+
+    if call.data == "sales_today":
+        report = await _build_sales_report(today, today)
+        await call.message.edit_text(report, reply_markup=None)
+
+    elif call.data == "sales_yesterday":
+        yesterday = today - timedelta(days=1)
+        report = await _build_sales_report(yesterday, yesterday)
+        await call.message.edit_text(report, reply_markup=None)
+
+    elif call.data == "sales_7d":
+        report = await _build_sales_report(today - timedelta(days=6), today)
+        await call.message.edit_text(report, reply_markup=None)
+
+    elif call.data == "sales_30d":
+        report = await _build_sales_report(today - timedelta(days=29), today)
+        await call.message.edit_text(report, reply_markup=None)
+
+    elif call.data == "sales_custom":
+        await SalesState.waiting_date_range.set()
+        await call.message.edit_text(
+            "✏️ Введите диапазон дат в формате:\n<code>ДД.ММ.ГГГГ-ДД.ММ.ГГГГ</code>\n\nНапример: <code>01.07.2025-10.07.2025</code>",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+
+
+@dp.message_handler(state=SalesState.waiting_date_range)
+async def sales_custom_dates(message: types.Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.finish()
+        return
+
+    raw = message.text.strip()
+    try:
+        parts = raw.split("-")
+        # Поддерживаем оба формата: "01.07.2025-10.07.2025" или "01.07-10.07.2025"
+        if len(parts) == 2:
+            date_from = datetime.strptime(parts[0].strip(), "%d.%m.%Y").date()
+            date_to   = datetime.strptime(parts[1].strip(), "%d.%m.%Y").date()
+        else:
+            raise ValueError("bad format")
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат. Пример: <code>01.07.2025-10.07.2025</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if date_from > date_to:
+        date_from, date_to = date_to, date_from
+
+    await state.finish()
+    report = await _build_sales_report(date_from, date_to)
+    await message.answer(report)
+
+
+# ========== ПРОСМОТР НАЛИЧИЯ (/inventory) ==========
+
+@dp.message_handler(commands=["inventory"])
+async def inventory_cmd(message: types.Message):
+    """
+    Показывает актуальный остаток товаров.
+    Остаток = products.stock (уменьшается при оформлении заказа,
+    возвращается при отмене). Бесплатные банки через gift_requests
+    тоже уменьшают stock при оформлении, поэтому отражаются корректно.
+    """
+    if not is_admin(message.from_user.id):
+        return
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, name_ru, stock, category, in_stock
+            FROM products
+            ORDER BY category, position, id
+        """)
+
+    if not rows:
+        await message.answer("📦 Товаров в базе нет.")
+        return
+
+    by_cat: dict[str, list] = {}
+    for r in rows:
+        cat = r["category"] or "elfliq"
+        by_cat.setdefault(cat, []).append(r)
+
+    lines = ["📦 Текущий остаток товаров\n"]
+
+    cat_labels = {"elfliq": "🧪 ELFLIQ", "elfworld": "🌍 ELFWORLD"}
+
+    for cat_key in ("elfliq", "elfworld"):
+        items = by_cat.get(cat_key, [])
+        if not items:
+            continue
+        lines.append(f"\n{cat_labels.get(cat_key, cat_key.upper())}:")
+
+        for r in items:
+            stock = r["stock"] or 0
+            name  = r["name_ru"]
+            if stock == 0:
+                status = "❌ нет"
+            elif stock <= 3:
+                status = f"⚠️ {stock} шт."
+            else:
+                status = f"✅ {stock} шт."
+            lines.append(f"  {name}: {status}")
+
+    # Итого
+    total_available = sum((r["stock"] or 0) for r in rows)
+    out_of_stock    = sum(1 for r in rows if (r["stock"] or 0) == 0)
+    lines.append(f"\n────────────────")
+    lines.append(f"Всего единиц: {total_available}")
+    lines.append(f"Позиций нет в наличии: {out_of_stock}")
+
+    await message.answer("\n".join(lines))
+
+
 # ========== ЗАПУСК ==========
 
 async def on_startup(dp):
