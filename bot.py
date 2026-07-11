@@ -5,7 +5,7 @@ import asyncio
 import asyncpg
 import random
 import aiohttp
-from datetime import date, timedelta, datetime 
+from datetime import date, timedelta, datetime
 from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, types
@@ -375,9 +375,14 @@ async def init_db():
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS streak_freezes (
             id SERIAL PRIMARY KEY,
+            city_key TEXT DEFAULT NULL,
             started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             ended_at TIMESTAMP
         )
+        """)
+        await conn.execute("""
+            ALTER TABLE streak_freezes
+            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
         """)
 
         # Таблица заявок на бесплатные банки (для синхронизации между админами)
@@ -815,7 +820,6 @@ TEXTS = {
         "gift_cancel": "❌ Отмена",
         "spin_bonus_exists": "У тебя уже есть непотраченный бонус",
         "spin_free_jar_exists": "У тебя уже есть бесплатная банка",
-        "givefreejar_done": "✅ Бесплатная банка выдана",
         "streak_current_weeks": "🔥 Текущий стрик: {weeks} недель",
         "streak_discount_value": "💸 Текущая скидка: -{value}€",
         "streak_discount_none": "💸 Текущая скидка: нет",
@@ -1026,7 +1030,6 @@ TEXTS = {
         "gift_cancel": "❌ Скасувати",
         "spin_bonus_exists": "У тебе вже є невикористаний бонус",
         "spin_free_jar_exists": "У тебе вже є безкоштовна банка",
-        "givefreejar_done": "✅ Безкоштовну банку видано",
         "streak_current_weeks": "🔥 Поточний стрик: {weeks} тижнів",
         "streak_discount_value": "💸 Поточна знижка: -{value}€",
         "streak_discount_none": "💸 Поточна знижка: немає",
@@ -1237,7 +1240,6 @@ TEXTS = {
         "gift_cancel": "❌ Abbrechen",
         "spin_bonus_exists": "Du hast bereits einen ungenutzten Bonus",
         "spin_free_jar_exists": "Du hast bereits eine Gratis-Dose",
-        "givefreejar_done": "✅ Gratis-Dose wurde vergeben",
         "streak_current_weeks": "🔥 Aktuelle Serie: {weeks} Wochen",
         "streak_discount_value": "💸 Aktueller Rabatt: -{value}€",
         "streak_discount_none": "💸 Aktueller Rabatt: keiner",
@@ -1568,19 +1570,6 @@ async def calculate_total_discount(uid, quantity):
     return round(total_discount, 2)
 
 async def calculate_final_price(uid, quantity):
-    # Проверяем тестовый override (только для админов через /testprice)
-    try:
-        async with pool.acquire() as conn:
-            override = await conn.fetchval(
-                "SELECT override_price FROM cart_price_override WHERE user_id=$1", uid
-            )
-    except Exception:
-        override = None
-
-    if override is not None:
-        # Тестовый режим: фиксированная цена за штуку, скидки не применяем
-        return round(override * quantity, 2), 0.0
-
     base_total = 15 * quantity
     discount = await calculate_total_discount(uid, quantity)
 
@@ -1736,27 +1725,36 @@ async def get_user_rate(uid: int, currency: str) -> float | None:
 
 
 
-async def is_streak_frozen() -> bool:
-    """Активна ли сейчас глобальная заморозка Buy Streak."""
+async def is_streak_frozen(city_key: str | None = None) -> bool:
+    """
+    Активна ли сейчас заморозка Buy Streak для данного города.
+    city_key=None → глобальная (city_key IS NULL) или city_key=конкретный город.
+    Считаем заморозку активной если есть запись с ended_at IS NULL для данного города
+    ИЛИ глобальная запись (city_key IS NULL).
+    """
     async with pool.acquire() as conn:
-        row = await conn.fetchval(
-            "SELECT 1 FROM streak_freezes WHERE ended_at IS NULL LIMIT 1"
-        )
+        row = await conn.fetchval("""
+            SELECT 1 FROM streak_freezes
+            WHERE ended_at IS NULL
+            AND (city_key IS NULL OR city_key = $1)
+            LIMIT 1
+        """, city_key)
     return row is not None
 
-async def get_frozen_days_since(since_date: date) -> float:
+
+async def get_frozen_days_since(since_date: date, city_key: str | None = None) -> float:
     """
     Сколько дней заморозки попало в промежуток [since_date, сейчас].
-    Учитывает все периоды заморозки (в т.ч. текущий незавершённый),
-    но только ту их часть, что приходится после since_date — чтобы
-    заморозка, случившаяся ДО последнего заказа пользователя, не
-    давала ему лишние дни.
+    Учитывает записи для конкретного города И глобальные (city_key IS NULL).
     """
     since_dt = datetime.combine(since_date, datetime.min.time())
     now_dt = datetime.now()
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT started_at, ended_at FROM streak_freezes")
+        rows = await conn.fetch("""
+            SELECT started_at, ended_at FROM streak_freezes
+            WHERE city_key IS NULL OR city_key = $1
+        """, city_key)
 
     total = timedelta()
     for r in rows:
@@ -1771,10 +1769,10 @@ async def get_frozen_days_since(since_date: date) -> float:
 
     return total.total_seconds() / 86400
 
-async def _effective_days_since(last_date: date) -> float:
-    """Сколько дней реально прошло с last_date до сегодня, не считая дней заморозки."""
+async def _effective_days_since(last_date: date, city_key: str | None = None) -> float:
+    """Сколько дней реально прошло с last_date до сегодня, не считая дней заморозки города."""
     real_days = (date.today() - last_date).days
-    frozen_days = await get_frozen_days_since(last_date)
+    frozen_days = await get_frozen_days_since(last_date, city_key)
     return max(real_days - frozen_days, 0)
 
 def get_streak_discount_value(weeks: int) -> float:
@@ -1785,7 +1783,7 @@ def get_streak_discount_value(weeks: int) -> float:
             value = s["value"]
     return value
 
-async def _calc_next_streak(old_weeks: int, last_date) -> int:
+async def _calc_next_streak(old_weeks: int, last_date, city_key: str | None = None) -> int:
     """
     Считает новое значение стрика в момент подтверждения нового заказа.
     last_date — дата предыдущего подтверждённого заказа (или None, если заказов не было).
@@ -1797,7 +1795,7 @@ async def _calc_next_streak(old_weeks: int, last_date) -> int:
     if not last_date:
         return 1
 
-    days_since = await _effective_days_since(last_date)
+    days_since = await _effective_days_since(last_date, city_key)
 
     if days_since <= 7:
         return (old_weeks or 0) + 1
@@ -1808,18 +1806,15 @@ async def _streak_snapshot(uid):
     """
     Возвращает текущее состояние Buy Streak пользователя:
     (текущий_стрик, дней_до_сброса, максимальный_стрик, заморожен_ли).
-
-    Если с последнего заказа прошло больше 7 "неморозных" дней — стрик
-    считается прерванным и сбрасывается в БД (чтобы не давать неактуальную
-    скидку дальше).
     """
     async with pool.acquire() as conn:
         user = await conn.fetchrow("""
-            SELECT streak_weeks, last_order_date, max_streak_weeks
+            SELECT streak_weeks, last_order_date, max_streak_weeks, city
             FROM users WHERE user_id=$1
         """, uid)
 
-    frozen = await is_streak_frozen()
+    city_key = user["city"] if user else None
+    frozen = await is_streak_frozen(city_key)
 
     if not user:
         return 0, 0, 0, frozen
@@ -1830,7 +1825,7 @@ async def _streak_snapshot(uid):
         return 0, 0, max_weeks, frozen
 
     weeks = user["streak_weeks"] or 0
-    days_since = await _effective_days_since(user["last_order_date"])
+    days_since = await _effective_days_since(user["last_order_date"], city_key)
 
     if days_since <= 7:
         days_left = max(7 - days_since, 0)
@@ -5099,7 +5094,8 @@ async def admin_confirm(call):
 
         new_streak = await _calc_next_streak(
             streak_row["streak_weeks"] or 0,
-            streak_row["last_order_date"]
+            streak_row["last_order_date"],
+            order_city
         )
 
         #    пользователя — начисляем скидку пригласившему ──
@@ -5358,102 +5354,115 @@ async def createpromo_cmd(message: types.Message):
     await message.answer(reply, parse_mode="HTML")
 
 
-@dp.message_handler(commands=["testprice"])
-async def testprice(message: types.Message):
-    if not is_super_admin(message.from_user.id):
-        return
-
-    uid = message.from_user.id
-    args = message.get_args().strip().lower()
-
-    # Гарантируем существование таблицы при любом вызове команды
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS cart_price_override (
-                user_id BIGINT PRIMARY KEY,
-                override_price REAL
-            )
-        """)
-
-    if args == "reset":
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM cart_price_override WHERE user_id=$1", uid
-            )
-        await message.answer("✅ Тестовая цена сброшена. В корзине снова реальные цены.")
-        return
-
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO cart_price_override (user_id, override_price)
-            VALUES ($1, 1.0)
-            ON CONFLICT (user_id) DO UPDATE SET override_price = 1.0
-        """, uid)
-
-    await message.answer(
-        "✅ Тестовая цена активна.\n\n"
-        "Все товары в корзине будут считаться по 1€ за штуку.\n"
-        "Оформи заказ через PayPal и проверь.\n\n"
-        "Для сброса: /testprice reset"
-    )
-
 @dp.message_handler(commands=["freezestreak"])
 async def freezestreak(message: types.Message):
-    if not is_super_admin(message.from_user.id):
+    """
+    Заморозка Buy Streak по городу.
+    Высший админ: /freezestreak <city|all>
+    Городской админ: /freezestreak  (город определяется автоматически)
+    """
+    uid = message.from_user.id
+    if not is_admin(uid):
         return
 
-    async with pool.acquire() as conn:
-        active = await conn.fetchval(
-            "SELECT 1 FROM streak_freezes WHERE ended_at IS NULL LIMIT 1"
-        )
+    actor_city = get_city_for_admin(uid)
 
-        if active:
-            await message.answer("❄️ Заморозка уже активна")
+    if actor_city is not None:
+        # Городской админ — замораживает только свой город
+        city_keys = [actor_city]
+    else:
+        # Высший админ — требует аргумент
+        arg = message.get_args().strip().lower()
+        if not arg:
+            city_names = " | ".join(CITIES.keys())
+            await message.answer(f"Использование: /freezestreak <{city_names}|all>")
+            return
+        if arg == "all":
+            city_keys = list(CITIES.keys())
+        elif arg in CITIES:
+            city_keys = [arg]
+        else:
+            city_names = " | ".join(CITIES.keys())
+            await message.answer(f"❌ Неизвестный город. Доступно: {city_names} | all")
             return
 
-        await conn.execute(
-            "INSERT INTO streak_freezes (started_at) VALUES (CURRENT_TIMESTAMP)"
-        )
+    async with pool.acquire() as conn:
+        frozen_results = []
+        already_frozen = []
+        for ck in city_keys:
+            active = await conn.fetchval("""
+                SELECT 1 FROM streak_freezes
+                WHERE ended_at IS NULL AND city_key = $1 LIMIT 1
+            """, ck)
+            if active:
+                already_frozen.append(CITIES[ck]["name"])
+            else:
+                await conn.execute(
+                    "INSERT INTO streak_freezes (city_key) VALUES ($1)", ck
+                )
+                frozen_results.append(CITIES[ck]["name"])
 
-    await message.answer("❄️ Глобальная заморозка Buy Streak включена. "
-                          "Отсчёт времени у всех пользователей остановлен.")
+    parts = []
+    if frozen_results:
+        parts.append(f"❄️ Заморозка стрика включена: {', '.join(frozen_results)}")
+    if already_frozen:
+        parts.append(f"⚠️ Уже была заморожена: {', '.join(already_frozen)}")
+    await message.answer("\n".join(parts))
+
 
 @dp.message_handler(commands=["unfreezestreak"])
 async def unfreezestreak(message: types.Message):
-    if not is_super_admin(message.from_user.id):
+    """
+    Разморозка Buy Streak по городу.
+    Высший админ: /unfreezestreak <city|all>
+    Городской админ: /unfreezestreak  (город определяется автоматически)
+    """
+    uid = message.from_user.id
+    if not is_admin(uid):
         return
 
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT id FROM streak_freezes WHERE ended_at IS NULL LIMIT 1"
-        )
+    actor_city = get_city_for_admin(uid)
 
-        if not row:
-            await message.answer("❄️ Заморозка не была активна")
+    if actor_city is not None:
+        city_keys = [actor_city]
+    else:
+        arg = message.get_args().strip().lower()
+        if not arg:
+            city_names = " | ".join(CITIES.keys())
+            await message.answer(f"Использование: /unfreezestreak <{city_names}|all>")
+            return
+        if arg == "all":
+            city_keys = list(CITIES.keys())
+        elif arg in CITIES:
+            city_keys = [arg]
+        else:
+            city_names = " | ".join(CITIES.keys())
+            await message.answer(f"❌ Неизвестный город. Доступно: {city_names} | all")
             return
 
-        await conn.execute(
-            "UPDATE streak_freezes SET ended_at = CURRENT_TIMESTAMP WHERE id=$1",
-            row["id"]
-        )
-
-    await message.answer("🔥 Глобальная заморозка Buy Streak выключена. "
-                          "Отсчёт времени продолжается с того места, где остановился.")
-
-@dp.message_handler(commands=["givefreejar"])
-async def givefreejar(message: types.Message):
-    if not is_super_admin(message.from_user.id):
-        return
-
-    uid = message.from_user.id
-
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET free_jar_bonus = 1 WHERE user_id=$1", uid
-        )
+        unfrozen = []
+        not_frozen = []
+        for ck in city_keys:
+            row = await conn.fetchrow("""
+                SELECT id FROM streak_freezes
+                WHERE ended_at IS NULL AND city_key = $1 LIMIT 1
+            """, ck)
+            if row:
+                await conn.execute(
+                    "UPDATE streak_freezes SET ended_at = CURRENT_TIMESTAMP WHERE id=$1",
+                    row["id"]
+                )
+                unfrozen.append(CITIES[ck]["name"])
+            else:
+                not_frozen.append(CITIES[ck]["name"])
 
-    await message.answer(await t(uid, "givefreejar_done"))
-
+    parts = []
+    if unfrozen:
+        parts.append(f"🔥 Заморозка стрика снята: {', '.join(unfrozen)}")
+    if not_frozen:
+        parts.append(f"⚠️ Не была заморожена: {', '.join(not_frozen)}")
+    await message.answer("\n".join(parts))
 
 # ========== БЛОКИРОВКА ПОЛЬЗОВАТЕЛЕЙ (/ban, /unban) ==========
 
@@ -5651,6 +5660,7 @@ async def _parse_stock_command(message: types.Message, mode: str):
         await message.answer(_stock_usage_text(uid, f"{mode}stock"))
         return
 
+    # setstock теперь поддерживает 'all' так же как addstock/removestock
     try:
         qty = int(qty_str)
         if mode in ("add", "remove") and qty <= 0:
