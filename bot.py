@@ -5396,6 +5396,8 @@ async def testprice(message: types.Message):
         "Оформи заказ через PayPal и проверь.\n\n"
         "Для сброса: /testprice reset"
     )
+
+@dp.message_handler(commands=["freezestreak"])
 async def freezestreak(message: types.Message):
     if not is_super_admin(message.from_user.id):
         return
