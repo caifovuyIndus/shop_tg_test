@@ -1,5 +1,4 @@
-import logging 
-import psycopg2
+import logging
 import os
 import asyncio
 import asyncpg
@@ -10,7 +9,6 @@ from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from aiogram.utils import executor
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
@@ -20,70 +18,70 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 
-# ========== КОНФИГУРАЦИЯ ГОРОДОВ И АДМИНИСТРАТОРОВ ==========
-# Чтобы добавить новый город:
-#   1. Добавить запись в CITIES с уникальным ключом
-#   2. stock_pool = "default" → использует products.stock (общий пул)
-#              = "<city_key>" → использует city_stock WHERE city_key='...'
-#   3. Добавить ID городских админов в admins
-# Чтобы добавить нового высшего админа — добавить ID в SUPER_ADMINS.
+SUPER_ADMIN_IDS = [
+    int(x.strip())
+    for x in os.getenv("SUPER_ADMINS", "7805603791").split(",")
+    if x.strip()
+]
 
-SUPER_ADMINS: list[int] = [7805603791]   # высшие админы (видят все города)
+SCHEMA_VERSION = 5
 
-CITIES: dict[str, dict] = {
-    "buerhausen": {
-        "name": "Buerhausen",
-        "stock_pool": "default",   # общий пул = products.stock
-        "admins": [8283121468],    # городские админы Buerhausen
-    },
-    "munich": {
-        "name": "Munich",
-        "stock_pool": "munich",    # отдельный пул = city_stock WHERE city_key='munich'
-        "admins": [1518888796, 5323274376],    # городские админы Munich
-    },
-}
-
-# Все существующие admin-ID для обратной совместимости (не менять)
-ADMIN_IDS: list[int] = list({*SUPER_ADMINS, *(uid for c in CITIES.values() for uid in c["admins"])})
-
-def is_admin(uid: int) -> bool:
-    return uid in ADMIN_IDS
-
-def is_super_admin(uid: int) -> bool:
-    return uid in SUPER_ADMINS
-
-def get_city_for_admin(uid: int) -> str | None:
-    """Возвращает city_key для городского админа, или None если это высший админ."""
-    for key, cfg in CITIES.items():
-        if uid in cfg["admins"]:
-            return key
-    return None
-
-def get_city_admins(city_key: str) -> list[int]:
-    """Список городских админов для указанного города."""
-    return CITIES.get(city_key, {}).get("admins", [])
-
-def get_order_city(city_key: str | None) -> str:
-    """
-    Возвращает city_key для маршрутизации заказа.
-    delivery и buerhausen → 'buerhausen' (общий пул и одни и те же городские админы).
-    None → 'buerhausen' (fallback).
-    """
-    return city_key if city_key in CITIES else "buerhausen"
-
-def get_stock_pool(city_key: str | None) -> str:
-    """
-    Возвращает ключ пула наличия для города.
-    'default' → products.stock; иное → city_stock.city_key.
-    delivery и None → используют пул buerhausen.
-    """
-    resolved = get_order_city(city_key)
-    return CITIES[resolved]["stock_pool"]
-
-logging.basicConfig(level=logging.INFO)
+_city_admin_ids: set = set()
+_admin_city_map: dict = {}
 
 
-storage = MemoryStorage()
+class StockUnavailable(Exception):
+    def __init__(self, product_id, available=0, name=None):
+        self.product_id = product_id
+        self.available = available
+        self.name = name
+
+
+def is_super_admin(uid):
+    return uid in SUPER_ADMIN_IDS
+
+
+def is_admin(uid):
+    return is_super_admin(uid) or uid in _city_admin_ids
+
+
+def get_city_for_admin(uid):
+    if is_super_admin(uid):
+        return None
+    return _admin_city_map.get(uid)
+
+
+async def refresh_admin_cache():
+    global _city_admin_ids, _admin_city_map
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT city_key, admin_id FROM cities")
+    _city_admin_ids = {r["admin_id"] for r in rows}
+    _admin_city_map = {r["admin_id"]: r["city_key"] for r in rows}
+
+
+async def notify_super_admin(text: str):
+    """Важные ошибки — сообщением высшему админу, не в лог."""
+    for admin_id in SUPER_ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, f"⚠️ Ошибка бота\n\n{text}")
+            return
+        except Exception as e:
+            logging.error("Failed to notify super admin %s: %s", admin_id, e)
+
+
+logging.basicConfig(level=logging.WARNING)
+
+_redis_url = os.getenv("REDIS_URL")
+if _redis_url:
+    try:
+        from aiogram.contrib.fsm_storage.redis import RedisStorage2
+        storage = RedisStorage2(_redis_url)
+    except Exception as e:
+        logging.warning("Redis unavailable, using MemoryStorage: %s", e)
+        storage = MemoryStorage()
+else:
+    storage = MemoryStorage()
+
 dp = Dispatcher(bot, storage=storage)
 
 _bot_username = None
@@ -96,9 +94,9 @@ class DeliveryForm(StatesGroup):
     address  = State()   # Шаг 3 — Bundesland. Stadt. Straße
     tracking = State()   # Шаг 4 — трек-номер или без
 
-class CitySelectContext(StatesGroup):
-    """Состояние выбора города (запускается из /start или профиля)."""
-    choosing = State()   # ожидаем нажатия кнопки города
+
+class CityManageForm(StatesGroup):
+    waiting_edit_value = State()
 
 async def get_bot_username() -> str:
     """Username бота для реферальных ссылок (кэшируется после первого запроса)."""
@@ -111,6 +109,85 @@ async def get_bot_username() -> str:
 # ========== БАЗА ДАННЫХ ==========
 
 pool = None
+
+
+async def _run_migrations(conn):
+    current = await conn.fetchval(
+        "SELECT MAX(version) FROM schema_version"
+    ) or 0
+
+    if current < 1:
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cart_user_id ON cart(user_id)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_city_key ON orders(city_key)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_streak_freezes_active "
+            "ON streak_freezes(started_at) WHERE ended_at IS NULL"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)"
+        )
+        await conn.execute(
+            "INSERT INTO schema_version (version) VALUES (1)"
+        )
+        current = 1
+
+    if current < 2:
+        await conn.execute("""
+            UPDATE products
+            SET stock = CASE WHEN in_stock = 1 THEN GREATEST(stock, 100) ELSE 0 END
+            WHERE stock = 0 OR stock IS NULL
+        """)
+        await conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+        current = 2
+
+    if current < 3:
+        default_admin = SUPER_ADMIN_IDS[0] if SUPER_ADMIN_IDS else 0
+        await conn.execute("""
+            INSERT INTO cities (city_key, name_ru, name_ua, name_de, admin_id, stock_pool, sort_order)
+            VALUES ('main', 'Основной', 'Основний', 'Haupt', $1, 'default', 0)
+            ON CONFLICT (city_key) DO NOTHING
+        """, default_admin)
+        await conn.execute("""
+            UPDATE users SET city = 'main' WHERE city IS NULL
+        """)
+        await conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+        current = 3
+
+    if current < 4:
+        await conn.execute("""
+            UPDATE orders SET city_key = 'main' WHERE city_key IS NULL
+        """)
+        await conn.execute("INSERT INTO schema_version (version) VALUES (4)")
+        current = 4
+
+    if current < 5:
+        await conn.execute("""
+            UPDATE products p
+            SET position = sub.rn
+            FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY id) AS rn
+                FROM products
+            ) sub
+            WHERE p.id = sub.id AND (p.position IS NULL OR p.position = 0)
+        """)
+        await conn.execute("INSERT INTO schema_version (version) VALUES (5)")
+
 
 async def init_db():
     global pool
@@ -266,36 +343,6 @@ async def init_db():
             ADD COLUMN IF NOT EXISTS banned BOOLEAN DEFAULT false
         """)
 
-        # ======= ГОРОДА =======
-        # city — выбранный город пользователя (city_key из CITIES, или NULL если не выбран).
-        # delivery — специальное значение: пользователь выбрал доставку (не самовывоз).
-        await conn.execute("""
-            ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS city TEXT DEFAULT NULL
-        """)
-
-        # Отдельные пулы наличия по городам.
-        # city_key = ключ из CITIES; product_id = id товара из products.
-        # stock = остаток. Если для города stock_pool='default', используется products.stock.
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS city_stock (
-            city_key TEXT NOT NULL,
-            product_id INTEGER NOT NULL,
-            stock INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (city_key, product_id)
-        )
-        """)
-
-        # Добавляем city_key в orders для маршрутизации
-        await conn.execute("""
-            ALTER TABLE orders
-            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
-        """)
-        await conn.execute("""
-            ALTER TABLE gift_requests
-            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
-        """)
-
         # ======= ДОСТАВКА =======
         # Текущий режим UI (delivery_mode=true → пользователь видит магазин
         # в режиме доставки). cart_mode хранит режим ПЕРВОГО добавленного в
@@ -375,14 +422,9 @@ async def init_db():
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS streak_freezes (
             id SERIAL PRIMARY KEY,
-            city_key TEXT DEFAULT NULL,
             started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             ended_at TIMESTAMP
         )
-        """)
-        await conn.execute("""
-            ALTER TABLE streak_freezes
-            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
         """)
 
         # Таблица заявок на бесплатные банки (для синхронизации между админами)
@@ -398,27 +440,7 @@ async def init_db():
         )
         """)
 
-        # ========== УПРАВЛЕНИЕ ОСТАТКАМИ ==========
-        # stock — фактическое количество товара в наличии
-        await conn.execute("""
-            ALTER TABLE products
-            ADD COLUMN IF NOT EXISTS stock INTEGER DEFAULT 0
-        """)
-        # Временный резерв: при оформлении заказа уменьшаем stock,
-        # при подтверждении — окончательно; при отмене — возвращаем
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS reserved_stock (
-            order_id INTEGER NOT NULL,
-            product_id INTEGER NOT NULL,
-            quantity INTEGER NOT NULL,
-            city_key TEXT DEFAULT NULL,
-            PRIMARY KEY (order_id, product_id)
-        )
-        """)
-        await conn.execute("""
-            ALTER TABLE reserved_stock
-            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
-        """)
+        # ========== ПРОМОКОДЫ ==========
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS promocodes (
             code TEXT PRIMARY KEY,
@@ -482,22 +504,75 @@ async def init_db():
                                    ELSE products.image END
             """, *row)
 
-        # position — порядковый номер товара внутри категории (1, 2, 3...).
-        # Позволяет использовать /addstock elfworld 1 вместо реального id из БД.
-        # Перезаписывается при каждом старте, чтобы учитывать новые товары.
+        # Колонка position: порядковый номер товара внутри категории (1, 2, 3...).
         await conn.execute("""
             ALTER TABLE products
             ADD COLUMN IF NOT EXISTS position INTEGER DEFAULT 0
         """)
+
+        # Количество на складе (для защиты от oversell)
         await conn.execute("""
-            UPDATE products p
-            SET position = sub.rn
-            FROM (
-                SELECT id, ROW_NUMBER() OVER (PARTITION BY category ORDER BY id) AS rn
-                FROM products
-            ) sub
-            WHERE p.id = sub.id
+            ALTER TABLE products
+            ADD COLUMN IF NOT EXISTS stock INTEGER DEFAULT 0
         """)
+
+        # Город пользователя
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS city TEXT
+        """)
+
+        # Город заказа
+        await conn.execute("""
+            ALTER TABLE orders
+            ADD COLUMN IF NOT EXISTS city_key TEXT
+        """)
+
+        # ================= CITIES =================
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS cities (
+            city_key TEXT PRIMARY KEY,
+            name_ru TEXT NOT NULL,
+            name_ua TEXT,
+            name_de TEXT,
+            admin_id BIGINT NOT NULL,
+            stock_pool TEXT DEFAULT 'default',
+            delivery_enabled BOOLEAN DEFAULT true,
+            sort_order INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS city_stock (
+            city_key TEXT NOT NULL REFERENCES cities(city_key) ON DELETE CASCADE,
+            product_id INTEGER NOT NULL REFERENCES products(id),
+            stock INTEGER DEFAULT 0,
+            PRIMARY KEY (city_key, product_id)
+        )
+        """)
+
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS reserved_stock (
+            order_id INTEGER PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+            city_key TEXT NOT NULL,
+            items TEXT NOT NULL
+        )
+        """)
+
+        await conn.execute("""
+            ALTER TABLE gift_requests
+            ADD COLUMN IF NOT EXISTS city_key TEXT
+        """)
+
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        await _run_migrations(conn)
 
 # ========== ТОВАРЫ ==========
 
@@ -706,6 +781,9 @@ TEXTS = {
         "language": "🌍 Язык",
         "empty_cart": "Корзина пуста",
         "choose_lang": "Выбери язык",
+        "choose_city": "🏙 Выбери город:",
+        "city_selected": "✅ Город выбран",
+        "stock_unavailable": "Некоторые товары закончились. Обнови корзину.",
         "choose_product": "🛒 Выбери товар:",
         "choose_section": "🚐 Выберите раздел",
         "banned_message": "🚫 Ваш аккаунт был заблокирован администрацией.",
@@ -820,6 +898,7 @@ TEXTS = {
         "gift_cancel": "❌ Отмена",
         "spin_bonus_exists": "У тебя уже есть непотраченный бонус",
         "spin_free_jar_exists": "У тебя уже есть бесплатная банка",
+        "givefreejar_done": "✅ Бесплатная банка выдана",
         "streak_current_weeks": "🔥 Текущий стрик: {weeks} недель",
         "streak_discount_value": "💸 Текущая скидка: -{value}€",
         "streak_discount_none": "💸 Текущая скидка: нет",
@@ -863,13 +942,6 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено колёс: {count}",
         "stats_invited": "👥 Приглашено пользователей: {count}",
         "stats_total_spent": "💰 Всего потрачено: {value}€",
-        "stock_out": "❌ К сожалению, товара {name} больше нет в наличии.\n\nУдалите его из корзины или выберите другой вкус.",
-        "stock_low": "❌ К сожалению, товара {name} осталось всего {qty} шт.",
-        "stock_low_cart": "❌ К сожалению, товара {name} осталось всего {qty} шт.\n\nПожалуйста, уменьшите количество или выберите другой вкус.",
-        "addstock_usage": "Использование:\n/addstock <elfliq|elfworld> <all|N[,N,...]> <кол-во>",
-        "removestock_usage": "Использование:\n/removestock <elfliq|elfworld> <all|N[,N,...]> <кол-во>",
-        "setstock_usage": "Использование:\n/setstock <elfliq|elfworld> <N[,N,...]> <кол-во>",
-        "stock_updated": "✅ Обновлено {count} товар(ов)",
         "promo_activated_discount": "🎉 Промокод активирован!\n\nСкидка -{value}€ добавлена к твоему заказу.",
         "promo_activated_free_jar": "🎉 Промокод активирован!\n\nТебе начислена бесплатная банка — выбери её в магазине.",
         "promo_not_found": "❌ Промокод не найден или уже использован.",
@@ -893,20 +965,6 @@ TEXTS = {
         "pay_i_paid_btn": "✅ Я оплатил",
         "pay_pending_user": "⏳ Оплата отправлена на проверку.\n\nАдминистратор свяжется с вами после подтверждения.",
         "rate_unavailable": "⚠️ Не удалось получить курс. Попробуй ещё раз через минуту.",
-        # --- Города ---
-        "choose_city": "🏙 Выбери город для самовывоза или выбери Доставку:",
-        "city_delivery_btn": "🚚 Доставка",
-        "city_not_set_reminder": "🏙 Ты ещё не выбрал город.\n\nПожалуйста, выбери город для самовывоза или выбери Доставку:",
-        "city_selected": "✅ Город выбран: {city}",
-        "city_delivery_selected": "✅ Выбрана Доставка",
-        "profile_city_row": "🏙 Город: {city}",
-        "profile_city_delivery": "🏙 Режим: Доставка",
-        "profile_city_none": "🏙 Город не выбран",
-        "profile_change_city": "🏙 Изменить город",
-        "admin_order_city": "🏙 Город: {city}",
-        "admin_confirmed_notify": "✅ Заказ подтверждён\n\n🏙 Город: {city}\n📦 Товары: {items}\n💰 Сумма: {total}€",
-        "stock_city_usage": "Использование:\n/addstock <город|all> <elfliq|elfworld> <all|N[,N,...]> <кол-во>\n\nДоступные города: {cities}",
-        "stock_city_invalid": "❌ Неверный город. Доступные: {cities}\nИли используйте 'all' для всех городов.",
     },
 
     "ua": {
@@ -916,6 +974,9 @@ TEXTS = {
         "language": "🌍 Мова",
         "empty_cart": "Кошик порожній",
         "choose_lang": "Обери мову",
+        "choose_city": "🏙 Обери місто:",
+        "city_selected": "✅ Місто обрано",
+        "stock_unavailable": "Деякі товари закінчилися. Онови кошик.",
         "choose_product": "🛒 Обери товар:",
         "choose_section": "🚐 Оберіть розділ",
         "banned_message": "🚫 Ваш акаунт було заблоковано адміністрацією.",
@@ -1030,6 +1091,7 @@ TEXTS = {
         "gift_cancel": "❌ Скасувати",
         "spin_bonus_exists": "У тебе вже є невикористаний бонус",
         "spin_free_jar_exists": "У тебе вже є безкоштовна банка",
+        "givefreejar_done": "✅ Безкоштовну банку видано",
         "streak_current_weeks": "🔥 Поточний стрик: {weeks} тижнів",
         "streak_discount_value": "💸 Поточна знижка: -{value}€",
         "streak_discount_none": "💸 Поточна знижка: немає",
@@ -1073,13 +1135,6 @@ TEXTS = {
         "stats_spins": "🎰 Прокручено коліс: {count}",
         "stats_invited": "👥 Запрошено користувачів: {count}",
         "stats_total_spent": "💰 Всього витрачено: {value}€",
-        "stock_out": "❌ На жаль, товару {name} більше немає в наявності.\n\nВидаліть його з кошика або оберіть інший смак.",
-        "stock_low": "❌ На жаль, товару {name} залишилось лише {qty} шт.",
-        "stock_low_cart": "❌ На жаль, товару {name} залишилось лише {qty} шт.\n\nБудь ласка, зменшіть кількість або оберіть інший смак.",
-        "addstock_usage": "Використання:\n/addstock <elfliq|elfworld> <all|N[,N,...]> <кількість>",
-        "removestock_usage": "Використання:\n/removestock <elfliq|elfworld> <all|N[,N,...]> <кількість>",
-        "setstock_usage": "Використання:\n/setstock <elfliq|elfworld> <N[,N,...]> <кількість>",
-        "stock_updated": "✅ Оновлено {count} товар(ів)",
         "promo_activated_discount": "🎉 Промокод активовано!\n\nЗнижку -{value}€ додано до твого замовлення.",
         "promo_activated_free_jar": "🎉 Промокод активовано!\n\nТобі нарахована безкоштовна банка — обери її в магазині.",
         "promo_not_found": "❌ Промокод не знайдено або вже використано.",
@@ -1103,20 +1158,6 @@ TEXTS = {
         "pay_i_paid_btn": "✅ Я оплатив",
         "pay_pending_user": "⏳ Оплата надіслана на перевірку.\n\nАдміністратор зв'яжеться з вами після підтвердження.",
         "rate_unavailable": "⚠️ Не вдалося отримати курс. Спробуй ще раз за хвилину.",
-        # --- Міста ---
-        "choose_city": "🏙 Обери місто для самовивозу або обери Доставку:",
-        "city_delivery_btn": "🚚 Доставка",
-        "city_not_set_reminder": "🏙 Ти ще не обрав місто.\n\nБудь ласка, обери місто для самовивозу або Доставку:",
-        "city_selected": "✅ Місто обрано: {city}",
-        "city_delivery_selected": "✅ Обрано Доставку",
-        "profile_city_row": "🏙 Місто: {city}",
-        "profile_city_delivery": "🏙 Режим: Доставка",
-        "profile_city_none": "🏙 Місто не обрано",
-        "profile_change_city": "🏙 Змінити місто",
-        "admin_order_city": "🏙 Місто: {city}",
-        "admin_confirmed_notify": "✅ Замовлення підтверджено\n\n🏙 Місто: {city}\n📦 Товари: {items}\n💰 Сума: {total}€",
-        "stock_city_usage": "Використання:\n/addstock <місто|all> <elfliq|elfworld> <all|N[,N,...]> <кількість>\n\nДоступні міста: {cities}",
-        "stock_city_invalid": "❌ Неправильне місто. Доступні: {cities}\nАбо використовуйте 'all' для всіх міст.",
     },
 
     "de": {
@@ -1126,6 +1167,9 @@ TEXTS = {
         "language": "🌍 Sprache",
         "empty_cart": "Warenkorb ist leer",
         "choose_lang": "Sprache wählen",
+        "choose_city": "🏙 Stadt wählen:",
+        "city_selected": "✅ Stadt ausgewählt",
+        "stock_unavailable": "Einige Artikel sind ausverkauft. Warenkorb aktualisieren.",
         "choose_product": "🛒 Produkt wählen:",
         "choose_section": "🚐 Wähle einen Bereich",
         "banned_message": "🚫 Dein Konto wurde von der Administration gesperrt.",
@@ -1240,6 +1284,7 @@ TEXTS = {
         "gift_cancel": "❌ Abbrechen",
         "spin_bonus_exists": "Du hast bereits einen ungenutzten Bonus",
         "spin_free_jar_exists": "Du hast bereits eine Gratis-Dose",
+        "givefreejar_done": "✅ Gratis-Dose wurde vergeben",
         "streak_current_weeks": "🔥 Aktuelle Serie: {weeks} Wochen",
         "streak_discount_value": "💸 Aktueller Rabatt: -{value}€",
         "streak_discount_none": "💸 Aktueller Rabatt: keiner",
@@ -1283,13 +1328,6 @@ TEXTS = {
         "stats_spins": "🎰 Gedrehte Räder: {count}",
         "stats_invited": "👥 Eingeladene Nutzer: {count}",
         "stats_total_spent": "💰 Insgesamt ausgegeben: {value}€",
-        "stock_out": "❌ Leider ist {name} nicht mehr vorrätig.\n\nBitte entferne es aus dem Warenkorb oder wähle eine andere Sorte.",
-        "stock_low": "❌ Leider sind nur noch {qty} Stück von {name} verfügbar.",
-        "stock_low_cart": "❌ Leider sind nur noch {qty} Stück von {name} verfügbar.\n\nBitte reduziere die Menge oder wähle eine andere Sorte.",
-        "addstock_usage": "Verwendung:\n/addstock <elfliq|elfworld> <all|N[,N,...]> <Menge>",
-        "removestock_usage": "Verwendung:\n/removestock <elfliq|elfworld> <all|N[,N,...]> <Menge>",
-        "setstock_usage": "Verwendung:\n/setstock <elfliq|elfworld> <N[,N,...]> <Menge>",
-        "stock_updated": "✅ {count} Produkt(e) aktualisiert",
         "promo_activated_discount": "🎉 Promocode aktiviert!\n\nRabatt von -{value}€ wurde deiner Bestellung hinzugefügt.",
         "promo_activated_free_jar": "🎉 Promocode aktiviert!\n\nDu erhältst eine Gratis-Dose — wähle sie im Shop aus.",
         "promo_not_found": "❌ Promocode nicht gefunden oder bereits verwendet.",
@@ -1313,20 +1351,6 @@ TEXTS = {
         "pay_i_paid_btn": "✅ Ich habe bezahlt",
         "pay_pending_user": "⏳ Zahlung zur Überprüfung gesendet.\n\nDer Admin meldet sich nach der Bestätigung.",
         "rate_unavailable": "⚠️ Kurs konnte nicht abgerufen werden. Versuche es in einer Minute erneut.",
-        # --- Städte ---
-        "choose_city": "🏙 Wähle deine Stadt für die Abholung oder wähle Lieferung:",
-        "city_delivery_btn": "🚚 Lieferung",
-        "city_not_set_reminder": "🏙 Du hast noch keine Stadt gewählt.\n\nBitte wähle deine Abholstadt oder Lieferung:",
-        "city_selected": "✅ Stadt gewählt: {city}",
-        "city_delivery_selected": "✅ Lieferung gewählt",
-        "profile_city_row": "🏙 Stadt: {city}",
-        "profile_city_delivery": "🏙 Modus: Lieferung",
-        "profile_city_none": "🏙 Keine Stadt gewählt",
-        "profile_change_city": "🏙 Stadt ändern",
-        "admin_order_city": "🏙 Stadt: {city}",
-        "admin_confirmed_notify": "✅ Bestellung bestätigt\n\n🏙 Stadt: {city}\n📦 Artikel: {items}\n💰 Summe: {total}€",
-        "stock_city_usage": "Verwendung:\n/addstock <Stadt|all> <elfliq|elfworld> <all|N[,N,...]> <Menge>\n\nVerfügbare Städte: {cities}",
-        "stock_city_invalid": "❌ Ungültige Stadt. Verfügbar: {cities}\nOder 'all' für alle Städte verwenden.",
     }
 }
 
@@ -1570,6 +1594,19 @@ async def calculate_total_discount(uid, quantity):
     return round(total_discount, 2)
 
 async def calculate_final_price(uid, quantity):
+    # Проверяем тестовый override (только для админов через /testprice)
+    try:
+        async with pool.acquire() as conn:
+            override = await conn.fetchval(
+                "SELECT override_price FROM cart_price_override WHERE user_id=$1", uid
+            )
+    except Exception:
+        override = None
+
+    if override is not None:
+        # Тестовый режим: фиксированная цена за штуку, скидки не применяем
+        return round(override * quantity, 2), 0.0
+
     base_total = 15 * quantity
     discount = await calculate_total_discount(uid, quantity)
 
@@ -1725,27 +1762,21 @@ async def get_user_rate(uid: int, currency: str) -> float | None:
 
 
 
-async def is_streak_frozen(city_key: str | None = None) -> bool:
-    """
-    Активна ли сейчас заморозка Buy Streak для данного города.
-    city_key=None → глобальная (city_key IS NULL) или city_key=конкретный город.
-    Считаем заморозку активной если есть запись с ended_at IS NULL для данного города
-    ИЛИ глобальная запись (city_key IS NULL).
-    """
+async def is_streak_frozen() -> bool:
+    """Активна ли сейчас глобальная заморозка Buy Streak."""
     async with pool.acquire() as conn:
-        row = await conn.fetchval("""
-            SELECT 1 FROM streak_freezes
-            WHERE ended_at IS NULL
-            AND (city_key IS NULL OR city_key = $1)
-            LIMIT 1
-        """, city_key)
+        row = await conn.fetchval(
+            "SELECT 1 FROM streak_freezes WHERE ended_at IS NULL LIMIT 1"
+        )
     return row is not None
 
-
-async def get_frozen_days_since(since_date: date, city_key: str | None = None) -> float:
+async def get_frozen_days_since(since_date: date) -> float:
     """
     Сколько дней заморозки попало в промежуток [since_date, сейчас].
-    Учитывает записи для конкретного города И глобальные (city_key IS NULL).
+    Учитывает все периоды заморозки (в т.ч. текущий незавершённый),
+    но только ту их часть, что приходится после since_date — чтобы
+    заморозка, случившаяся ДО последнего заказа пользователя, не
+    давала ему лишние дни.
     """
     since_dt = datetime.combine(since_date, datetime.min.time())
     now_dt = datetime.now()
@@ -1753,8 +1784,9 @@ async def get_frozen_days_since(since_date: date, city_key: str | None = None) -
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT started_at, ended_at FROM streak_freezes
-            WHERE city_key IS NULL OR city_key = $1
-        """, city_key)
+            WHERE COALESCE(ended_at, CURRENT_TIMESTAMP) >= $1
+              AND started_at <= CURRENT_TIMESTAMP
+        """, since_dt)
 
     total = timedelta()
     for r in rows:
@@ -1769,10 +1801,10 @@ async def get_frozen_days_since(since_date: date, city_key: str | None = None) -
 
     return total.total_seconds() / 86400
 
-async def _effective_days_since(last_date: date, city_key: str | None = None) -> float:
-    """Сколько дней реально прошло с last_date до сегодня, не считая дней заморозки города."""
+async def _effective_days_since(last_date: date) -> float:
+    """Сколько дней реально прошло с last_date до сегодня, не считая дней заморозки."""
     real_days = (date.today() - last_date).days
-    frozen_days = await get_frozen_days_since(last_date, city_key)
+    frozen_days = await get_frozen_days_since(last_date)
     return max(real_days - frozen_days, 0)
 
 def get_streak_discount_value(weeks: int) -> float:
@@ -1783,7 +1815,7 @@ def get_streak_discount_value(weeks: int) -> float:
             value = s["value"]
     return value
 
-async def _calc_next_streak(old_weeks: int, last_date, city_key: str | None = None) -> int:
+async def _calc_next_streak(old_weeks: int, last_date) -> int:
     """
     Считает новое значение стрика в момент подтверждения нового заказа.
     last_date — дата предыдущего подтверждённого заказа (или None, если заказов не было).
@@ -1795,7 +1827,7 @@ async def _calc_next_streak(old_weeks: int, last_date, city_key: str | None = No
     if not last_date:
         return 1
 
-    days_since = await _effective_days_since(last_date, city_key)
+    days_since = await _effective_days_since(last_date)
 
     if days_since <= 7:
         return (old_weeks or 0) + 1
@@ -1806,15 +1838,18 @@ async def _streak_snapshot(uid):
     """
     Возвращает текущее состояние Buy Streak пользователя:
     (текущий_стрик, дней_до_сброса, максимальный_стрик, заморожен_ли).
+
+    Если с последнего заказа прошло больше 7 "неморозных" дней — стрик
+    считается прерванным и сбрасывается в БД (чтобы не давать неактуальную
+    скидку дальше).
     """
     async with pool.acquire() as conn:
         user = await conn.fetchrow("""
-            SELECT streak_weeks, last_order_date, max_streak_weeks, city
+            SELECT streak_weeks, last_order_date, max_streak_weeks
             FROM users WHERE user_id=$1
         """, uid)
 
-    city_key = user["city"] if user else None
-    frozen = await is_streak_frozen(city_key)
+    frozen = await is_streak_frozen()
 
     if not user:
         return 0, 0, 0, frozen
@@ -1825,7 +1860,7 @@ async def _streak_snapshot(uid):
         return 0, 0, max_weeks, frozen
 
     weeks = user["streak_weeks"] or 0
-    days_since = await _effective_days_since(user["last_order_date"], city_key)
+    days_since = await _effective_days_since(user["last_order_date"])
 
     if days_since <= 7:
         days_left = max(7 - days_since, 0)
@@ -1843,13 +1878,321 @@ async def get_effective_streak(uid) -> int:
     weeks, _, _, _ = await _streak_snapshot(uid)
     return weeks
 
-async def get_lang(uid):
+# ========== ГОРОДА И СКЛАД ==========
+
+async def get_city(city_key):
+    if not city_key:
+        return None
     async with pool.acquire() as conn:
-        lang = await conn.fetchval(
-            "SELECT language FROM users WHERE user_id=$1",
-            uid
+        return await conn.fetchrow("SELECT * FROM cities WHERE city_key=$1", city_key)
+
+
+async def get_all_cities():
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT * FROM cities ORDER BY sort_order, name_ru"
         )
-    return lang or "ru"
+
+
+async def get_admins_for_city(city_key) -> list:
+    admins = set(SUPER_ADMIN_IDS)
+    city = await get_city(city_key)
+    if city:
+        admins.add(city["admin_id"])
+    return list(admins)
+
+
+async def get_user_city(uid):
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT city FROM users WHERE user_id=$1", uid)
+
+
+async def get_user_info(uid):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT language, city, banned FROM users WHERE user_id=$1", uid
+        )
+    if not row:
+        return {"language": "ru", "city": None, "banned": False}
+    return {
+        "language": row["language"] or "ru",
+        "city": row["city"],
+        "banned": bool(row["banned"]),
+    }
+
+
+async def ensure_user_city(uid):
+    info = await get_user_info(uid)
+    if info["city"]:
+        return info["city"]
+    cities = await get_all_cities()
+    if len(cities) == 1:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET city=$1 WHERE user_id=$2",
+                cities[0]["city_key"], uid,
+            )
+        return cities[0]["city_key"]
+    return None
+
+
+async def get_city_name(city_key, lang="ru"):
+    city = await get_city(city_key)
+    if not city:
+        return city_key or "?"
+    return city.get(f"name_{lang}") or city["name_ru"]
+
+
+async def _get_stock_pool(city_key):
+    city = await get_city(city_key)
+    if not city:
+        return "default"
+    return city["stock_pool"] or "default"
+
+
+async def get_stock_for_city(conn, product_id, city_key, stock_pool=None, for_update=False):
+    if stock_pool is None:
+        stock_pool = await _get_stock_pool(city_key)
+    lock = "FOR UPDATE OF p" if for_update else ""
+    if stock_pool == "city":
+        val = await conn.fetchval(f"""
+            SELECT stock FROM city_stock
+            WHERE city_key=$1 AND product_id=$2
+            {"FOR UPDATE" if for_update else ""}
+        """, city_key, product_id)
+        return val or 0
+    if for_update:
+        val = await conn.fetchval(
+            "SELECT stock FROM products WHERE id=$1 FOR UPDATE", product_id
+        )
+    else:
+        val = await conn.fetchval(
+            "SELECT stock FROM products WHERE id=$1", product_id
+        )
+    return val or 0
+
+
+async def get_stocks_batch(conn, product_ids, city_key, stock_pool, for_update=False):
+    if not product_ids:
+        return {}
+    if stock_pool == "city":
+        lock = "FOR UPDATE" if for_update else ""
+        rows = await conn.fetch(f"""
+            SELECT product_id, COALESCE(stock, 0) AS stock
+            FROM city_stock
+            WHERE city_key=$1 AND product_id = ANY($2::int[])
+            {lock}
+        """, city_key, product_ids)
+        result = {r["product_id"]: r["stock"] for r in rows}
+        for pid in product_ids:
+            result.setdefault(pid, 0)
+        return result
+    lock = "FOR UPDATE" if for_update else ""
+    rows = await conn.fetch(f"""
+        SELECT id AS product_id, COALESCE(stock, 0) AS stock
+        FROM products WHERE id = ANY($1::int[])
+        {lock}
+    """, product_ids)
+    result = {r["product_id"]: r["stock"] for r in rows}
+    for pid in product_ids:
+        result.setdefault(pid, 0)
+    return result
+
+
+async def _decrease_stock_conn(conn, product_id, qty, city_key, stock_pool):
+    if stock_pool == "city":
+        await conn.execute("""
+            UPDATE city_stock
+            SET stock = GREATEST(stock - $1, 0)
+            WHERE city_key=$2 AND product_id=$3
+        """, qty, city_key, product_id)
+    else:
+        await conn.execute("""
+            UPDATE products
+            SET stock = GREATEST(stock - $1, 0)
+            WHERE id=$2
+        """, qty, product_id)
+
+
+async def _increase_stock_conn(conn, product_id, qty, city_key, stock_pool):
+    if stock_pool == "city":
+        await conn.execute("""
+            INSERT INTO city_stock (city_key, product_id, stock)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (city_key, product_id)
+            DO UPDATE SET stock = city_stock.stock + $3
+        """, city_key, product_id, qty)
+    else:
+        await conn.execute("""
+            UPDATE products SET stock = stock + $1 WHERE id=$2
+        """, qty, product_id)
+
+
+async def release_reserved_stock_conn(conn, order_id):
+    row = await conn.fetchrow(
+        "SELECT city_key, items FROM reserved_stock WHERE order_id=$1", order_id
+    )
+    if not row:
+        return
+    stock_pool = await _get_stock_pool(row["city_key"])
+    for part in row["items"].split(","):
+        if ":" not in part:
+            continue
+        pid, qty = part.split(":")
+        await _increase_stock_conn(conn, int(pid), int(qty), row["city_key"], stock_pool)
+    await conn.execute("DELETE FROM reserved_stock WHERE order_id=$1", order_id)
+
+
+async def check_cart_stock(uid) -> list:
+    """Проверка наличия. Возвращает список сообщений об ошибках."""
+    user_city = await get_user_city(uid)
+    if not user_city:
+        return ["Город не выбран"]
+    stock_pool = await _get_stock_pool(user_city)
+    async with pool.acquire() as conn:
+        cart_items = await conn.fetch(
+            "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
+        )
+        if not cart_items:
+            return []
+        pids = [r["product_id"] for r in cart_items]
+        products = await conn.fetch("""
+            SELECT id, name_ru, in_stock FROM products WHERE id = ANY($1::int[])
+        """, pids)
+        prod_map = {p["id"]: p for p in products}
+        stocks = await get_stocks_batch(conn, pids, user_city, stock_pool)
+    errors = []
+    for item in cart_items:
+        pid = item["product_id"]
+        wanted = item["quantity"]
+        prod = prod_map.get(pid)
+        if not prod or not prod["in_stock"]:
+            errors.append(f"❌ {prod['name_ru'] if prod else pid}: нет в наличии")
+            continue
+        available = stocks.get(pid, 0)
+        if available < wanted:
+            errors.append(
+                f"❌ {prod['name_ru']}: нужно {wanted}, доступно {available}"
+            )
+    return errors
+
+
+async def _create_order_with_stock_reserve(
+    uid, payment, is_delivery=None,
+) -> tuple:
+    """
+    Атомарно: проверка stock (FOR UPDATE), резерв, создание заказа, очистка корзины.
+    Возвращает (order_id, items_str, eur_total, discount, text_admin, city_key).
+    """
+    user_city = await get_user_city(uid)
+    if not user_city:
+        raise ValueError("city_not_set")
+    stock_pool = await _get_stock_pool(user_city)
+    if is_delivery is None:
+        cart_mode = await get_cart_mode(uid)
+        is_delivery = cart_mode == "delivery"
+
+    async with pool.acquire() as conn:
+        cart_items = await conn.fetch(
+            "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
+        )
+        if not cart_items:
+            return None
+
+        total_qty = sum(r["quantity"] for r in cart_items)
+        eur_total, discount = await calculate_final_price(uid, total_qty)
+        pids = [r["product_id"] for r in cart_items]
+        products = await conn.fetch("""
+            SELECT id, name_ru, in_stock FROM products WHERE id = ANY($1::int[])
+        """, pids)
+        prod_map = {p["id"]: p for p in products}
+
+        async with conn.transaction():
+            stocks = await get_stocks_batch(
+                conn, pids, user_city, stock_pool, for_update=True
+            )
+            for item in cart_items:
+                pid = item["product_id"]
+                wanted = item["quantity"]
+                prod = prod_map.get(pid)
+                if not prod or not prod["in_stock"]:
+                    raise StockUnavailable(pid, 0, prod["name_ru"] if prod else None)
+                available = stocks.get(pid, 0)
+                if available < wanted:
+                    raise StockUnavailable(pid, available, prod["name_ru"])
+
+            items_str_parts = []
+            text_admin = "ЗАКАЗ:\n"
+            for item in cart_items:
+                pid = item["product_id"]
+                qty = item["quantity"]
+                prod = prod_map[pid]
+                text_admin += f"{prod['name_ru']} x{qty}\n"
+                items_str_parts.append(f"{pid}:{qty}")
+                await _decrease_stock_conn(conn, pid, qty, user_city, stock_pool)
+
+            items_str = ",".join(items_str_parts)
+
+            order_id = await conn.fetchval("""
+                INSERT INTO orders
+                    (user_id, items, total, payment, discount, status, is_delivery, city_key)
+                VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
+                RETURNING id
+            """, uid, items_str, eur_total, payment, discount, is_delivery, user_city)
+
+            await conn.execute("""
+                INSERT INTO reserved_stock (order_id, city_key, items)
+                VALUES ($1, $2, $3)
+            """, order_id, user_city, items_str)
+
+            await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
+            await conn.execute(
+                "UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid
+            )
+
+    return order_id, items_str, eur_total, discount, text_admin, user_city
+
+
+async def notify_admins_order(order_id, uid, username, text_admin, payment_line,
+                              is_delivery=True, city_key=None):
+    """Отправляет заказ админам города + суперадминам."""
+    if not city_key:
+        city_key = await get_user_city(uid)
+    city_name = await get_city_name(city_key, "ru")
+    order_type = "🚚 Доставка" if is_delivery else "🏪 Самовывоз"
+    delivery_block = await _build_delivery_admin_block(uid) if is_delivery else ""
+    order_text = (
+        f"{order_type} | 🏙 {city_name}\n{text_admin}\n"
+        f"ID: {order_id}\n"
+        f"User: @{username}\n"
+        f"{payment_line}"
+        f"{delivery_block}"
+    )
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}"),
+    )
+    msg_ids = []
+    for admin_id in await get_admins_for_city(city_key):
+        try:
+            sent = await bot.send_message(admin_id, order_text, reply_markup=kb)
+            msg_ids.append(f"{admin_id}:{sent.message_id}")
+        except Exception as e:
+            await notify_super_admin(
+                f"Не удалось отправить заказ #{order_id} админу {admin_id}: {e}"
+            )
+    if msg_ids:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE orders SET admin_message_ids=$1 WHERE id=$2",
+                ",".join(msg_ids), order_id,
+            )
+
+
+async def get_lang(uid):
+    info = await get_user_info(uid)
+    return info["language"]
 
 async def check_not_banned(target) -> bool:
     """
@@ -1859,16 +2202,12 @@ async def check_not_banned(target) -> bool:
     прервать выполнение (return).
     """
     uid = target.from_user.id
+    info = await get_user_info(uid)
 
-    async with pool.acquire() as conn:
-        banned = await conn.fetchval(
-            "SELECT banned FROM users WHERE user_id=$1", uid
-        )
-
-    if not banned:
+    if not info["banned"]:
         return True
 
-    text = await t(uid, "banned_message")
+    text = TEXTS[info["language"]]["banned_message"]
 
     if isinstance(target, types.CallbackQuery):
         await target.answer(text, show_alert=True)
@@ -1893,130 +2232,6 @@ def is_text(message, key):
     if not message.text:
         return False
     return any(message.text == TEXTS[l][key] for l in TEXTS)
-
-
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ГОРОДОВ ==========
-
-async def get_user_city(uid: int) -> str | None:
-    """Возвращает city из таблицы users (None если не выбран)."""
-    async with pool.acquire() as conn:
-        return await conn.fetchval(
-            "SELECT city FROM users WHERE user_id=$1", uid
-        )
-
-
-async def set_user_city(uid: int, city: str | None) -> None:
-    """Сохраняет город пользователя. city='delivery' → режим доставки."""
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET city=$1 WHERE user_id=$1", city, uid
-        )
-        if city == "delivery":
-            await conn.execute(
-                "UPDATE users SET delivery_mode=1 WHERE user_id=$1", uid
-            )
-        else:
-            await conn.execute(
-                "UPDATE users SET delivery_mode=0 WHERE user_id=$1", uid
-            )
-
-
-async def show_city_selection(target, uid: int, *, back_cb: str | None = None) -> None:
-    """Показывает экран выбора города. Вызывается из /start и профиля."""
-    text = await t(uid, "choose_city")
-    kb = InlineKeyboardMarkup(row_width=1)
-    for city_key, cfg in CITIES.items():
-        kb.add(InlineKeyboardButton(
-            f"🏙 {cfg['name']}",
-            callback_data=f"city_select_{city_key}"
-        ))
-    kb.add(InlineKeyboardButton(
-        await t(uid, "city_delivery_btn"),
-        callback_data="city_select_delivery"
-    ))
-    if back_cb:
-        kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data=back_cb))
-    await render(target, text, kb)
-
-
-async def remind_city_if_needed(target, uid: int) -> bool:
-    """
-    Если город не выбран — показывает напоминание и возвращает True.
-    Если город уже выбран — ничего не делает и возвращает False.
-    """
-    city = await get_user_city(uid)
-    if city:
-        return False
-    text = await t(uid, "city_not_set_reminder")
-    kb = InlineKeyboardMarkup(row_width=1)
-    for city_key, cfg in CITIES.items():
-        kb.add(InlineKeyboardButton(
-            f"🏙 {cfg['name']}",
-            callback_data=f"city_select_{city_key}"
-        ))
-    kb.add(InlineKeyboardButton(
-        await t(uid, "city_delivery_btn"),
-        callback_data="city_select_delivery"
-    ))
-    if isinstance(target, types.Message):
-        await target.answer(text, reply_markup=kb)
-    else:
-        await render(target, text, kb)
-    return True
-
-
-# ========== STOCK: ГОРОД-СПЕЦИФИЧНЫЕ ХЕЛПЕРЫ ==========
-
-async def get_stock_for_city(conn, product_id: int, city_key: str | None) -> int:
-    """
-    Возвращает остаток товара с учётом пула города.
-    delivery → тот же пул, что и buerhausen (default).
-    """
-    pool_key = get_stock_pool(city_key)
-    if pool_key == "default":
-        return (await conn.fetchval(
-            "SELECT stock FROM products WHERE id=$1", product_id
-        )) or 0
-    row = await conn.fetchrow(
-        "SELECT stock FROM city_stock WHERE city_key=$1 AND product_id=$2",
-        pool_key, product_id
-    )
-    return row["stock"] if row else 0
-
-
-async def update_stock_for_city(conn, product_id: int, city_key: str | None, delta: int) -> None:
-    """Изменяет остаток товара на delta (отрицательный = уменьшить)."""
-    pool_key = get_stock_pool(city_key)
-    if pool_key == "default":
-        await conn.execute(
-            "UPDATE products SET stock = GREATEST(stock + $1, 0) WHERE id=$2",
-            delta, product_id
-        )
-    else:
-        # upsert city_stock
-        await conn.execute("""
-            INSERT INTO city_stock (city_key, product_id, stock)
-            VALUES ($1, $2, GREATEST($3, 0))
-            ON CONFLICT (city_key, product_id) DO UPDATE
-            SET stock = GREATEST(city_stock.stock + $3, 0)
-        """, pool_key, product_id, delta)
-
-
-async def set_stock_for_city(conn, product_id: int, city_key: str | None, value: int) -> None:
-    """Устанавливает остаток товара явно."""
-    pool_key = get_stock_pool(city_key)
-    if pool_key == "default":
-        await conn.execute(
-            "UPDATE products SET stock = $1 WHERE id=$2", value, product_id
-        )
-    else:
-        await conn.execute("""
-            INSERT INTO city_stock (city_key, product_id, stock)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (city_key, product_id) DO UPDATE
-            SET stock = $3
-        """, pool_key, product_id, value)
-
 
 def get_rank(total_items):
     ranks = DISCOUNTS.get("rank", [])
@@ -2127,7 +2342,7 @@ async def render_profile(target):
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT total_items, total_orders, total_saved, delivery_saved,
-                   promo_discount, promo_code, promo_type, city
+                   promo_discount, promo_code, promo_type
             FROM users WHERE user_id=$1
         """, uid)
 
@@ -2138,7 +2353,6 @@ async def render_profile(target):
     promo_discount = row["promo_discount"] or 0
     promo_code = row["promo_code"]
     promo_type = row["promo_type"]
-    user_city = row["city"]
 
     lang = await get_lang(uid)
     rank = get_rank(items)
@@ -2146,18 +2360,9 @@ async def render_profile(target):
 
     total_discount = await calculate_total_discount(uid, 1)
 
-    # Строка города
-    if user_city == "delivery":
-        city_line = await t(uid, "profile_city_delivery")
-    elif user_city and user_city in CITIES:
-        city_line = (await t(uid, "profile_city_row")).format(city=CITIES[user_city]["name"])
-    else:
-        city_line = await t(uid, "profile_city_none")
-
     text = (
         f"{await t(uid,'profile_title')}\n\n"
         f"{rank_name}\n\n"
-        f"{city_line}\n\n"
         f"📦 {await t(uid,'profile_items')}: {items}\n"
         f"🧾 {await t(uid,'profile_orders')}: {orders}\n"
         f"💸 {await t(uid,'profile_saved')}: {saved:.2f}€\n"
@@ -2199,12 +2404,6 @@ async def render_profile(target):
                 callback_data="profile_delivery"
             )
         )
-    kb.add(
-        InlineKeyboardButton(
-            await t(uid, "profile_change_city"),
-            callback_data="profile_change_city"
-        )
-    )
     kb.add(
         InlineKeyboardButton(await t(uid,"to_shop"), callback_data="back_shop"),
     )
@@ -3195,20 +3394,10 @@ async def gift_confirm(call):
         await call.answer(await t(uid, "gift_already_used"), show_alert=True)
         return
 
-    # Проверяем наличие выбранного товара по городу пользователя
-    user_city = await get_user_city(uid)
     async with pool.acquire() as conn:
         p = await conn.fetchrow(
             "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
         )
-        stock = await get_stock_for_city(conn, pid, user_city)
-
-    if not p or stock <= 0:
-        await call.answer(
-            (await t(uid, "stock_out")).format(name=p["name_ru"] if p else f"#{pid}"),
-            show_alert=True
-        )
-        return
 
     lang = await get_lang(uid)
     name = p[f"name_{lang}"]
@@ -3246,20 +3435,10 @@ async def gift_delivery_confirm(call):
         await call.answer(await t(uid, "gift_already_used"), show_alert=True)
         return
 
-    # Проверяем наличие выбранного товара по городу пользователя
-    user_city = await get_user_city(uid)
     async with pool.acquire() as conn:
         p = await conn.fetchrow(
             "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
         )
-        stock = await get_stock_for_city(conn, pid, user_city)
-
-    if not p or stock <= 0:
-        await call.answer(
-            (await t(uid, "stock_out")).format(name=p["name_ru"] if p else f"#{pid}"),
-            show_alert=True
-        )
-        return
 
     lang = await get_lang(uid)
     name = p[f"name_{lang}"]
@@ -3287,21 +3466,8 @@ async def gift_apply(call):
     pid = int(call.data.split("_")[2])
     username = call.from_user.username or "unknown"
 
-    # Финальная проверка наличия с учётом города пользователя
-    user_city = await get_user_city(uid)
-    resolved_city = get_order_city(user_city)
     async with pool.acquire() as conn:
-        product_name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
-        stock = await get_stock_for_city(conn, pid, user_city)
-    if stock <= 0:
-        await call.answer(
-            (await t(uid, "stock_out")).format(name=product_name),
-            show_alert=True
-        )
-        return
-
-    async with pool.acquire() as conn:
-        # Атомарное списание bonus
+        # Атомарное списание
         updated = await conn.fetchval("""
             UPDATE users
             SET free_jar_bonus = 0
@@ -3322,26 +3488,16 @@ async def gift_apply(call):
     lang = await get_lang(uid)
     name = p[f"name_{lang}"]
 
-    # Создаём заявку и резервируем stock по городу
+    # Создаём запись заявки (без request_id пока)
     async with pool.acquire() as conn:
         request_id = await conn.fetchval("""
             INSERT INTO gift_requests (user_id, product_id, username)
             VALUES ($1, $2, $3)
             RETURNING id
         """, uid, pid, username)
-        # Резервируем 1 единицу в пуле города (отрицательный order_id чтобы не конфликтовать с orders)
-        await update_stock_for_city(conn, pid, user_city, -1)
-        await conn.execute("""
-            INSERT INTO reserved_stock (order_id, product_id, quantity, city_key)
-            VALUES ($1, $2, 1, $3)
-            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = 1, city_key = EXCLUDED.city_key
-        """, -request_id, pid, resolved_city)
-
-    city_admin_ids = get_city_admins(resolved_city) or ADMIN_IDS
 
     admin_text = (
         f"🎁 Бесплатная банка\n\n"
-        f"🏙 Город: {CITIES.get(resolved_city, {}).get('name', resolved_city)}\n"
         f"Пользователь: @{username}\n\n"
         f"Выбранный товар:\n{name_ru}"
     )
@@ -3352,20 +3508,20 @@ async def gift_apply(call):
         InlineKeyboardButton("❌ Отменить", callback_data=f"gift_rejected_{request_id}")
     )
 
-    # Рассылаем городским админам и запоминаем message_id
+    # Рассылаем всем админам и запоминаем message_id
     msg_ids = []
-    for admin_id in city_admin_ids:
+    for admin_id in ADMIN_IDS:
         try:
             sent = await bot.send_message(admin_id, admin_text, reply_markup=admin_kb)
             msg_ids.append(f"{admin_id}:{sent.message_id}")
         except Exception:
             pass
 
-    # Сохраняем message_ids и city_key в заявке
+    # Сохраняем message_ids в заявке
     async with pool.acquire() as conn:
         await conn.execute("""
-            UPDATE gift_requests SET admin_message_ids=$1, city_key=$2 WHERE id=$3
-        """, ",".join(msg_ids), resolved_city, request_id)
+            UPDATE gift_requests SET admin_message_ids=$1 WHERE id=$2
+        """, ",".join(msg_ids), request_id)
 
     # Подтверждение пользователю
     await render(call, await t(uid, "gift_done"))
@@ -3382,19 +3538,6 @@ async def gift_delivery_apply(call):
     pid = int(call.data.split("gift_delivery_apply_")[1])
     username = call.from_user.username or "unknown"
 
-    # Финальная проверка наличия с учётом города пользователя
-    user_city = await get_user_city(uid)
-    resolved_city = get_order_city(user_city)
-    async with pool.acquire() as conn:
-        product_name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
-        stock = await get_stock_for_city(conn, pid, user_city)
-    if stock <= 0:
-        await call.answer(
-            (await t(uid, "stock_out")).format(name=product_name),
-            show_alert=True
-        )
-        return
-
     async with pool.acquire() as conn:
         updated = await conn.fetchval("""
             UPDATE users
@@ -3422,22 +3565,12 @@ async def gift_delivery_apply(call):
             VALUES ($1, $2, $3)
             RETURNING id
         """, uid, pid, username)
-        # Резервируем 1 единицу в пуле города
-        await update_stock_for_city(conn, pid, user_city, -1)
-        await conn.execute("""
-            INSERT INTO reserved_stock (order_id, product_id, quantity, city_key)
-            VALUES ($1, $2, 1, $3)
-            ON CONFLICT (order_id, product_id) DO UPDATE SET quantity = 1, city_key = EXCLUDED.city_key
-        """, -request_id, pid, resolved_city)
-
-    city_admin_ids = get_city_admins(resolved_city) or ADMIN_IDS
 
     # Блок данных доставки для администратора
     delivery_block = await _build_delivery_admin_block(uid)
 
     admin_text = (
         f"🎁 Бесплатная банка (ДОСТАВКА)\n\n"
-        f"🏙 Город: {CITIES.get(resolved_city, {}).get('name', resolved_city)}\n"
         f"Пользователь: @{username}\n\n"
         f"Выбранный товар:\n{name_ru}"
         f"{delivery_block}"
@@ -3450,7 +3583,7 @@ async def gift_delivery_apply(call):
     )
 
     msg_ids = []
-    for admin_id in city_admin_ids:
+    for admin_id in ADMIN_IDS:
         try:
             sent = await bot.send_message(admin_id, admin_text, reply_markup=admin_kb)
             msg_ids.append(f"{admin_id}:{sent.message_id}")
@@ -3459,8 +3592,8 @@ async def gift_delivery_apply(call):
 
     async with pool.acquire() as conn:
         await conn.execute("""
-            UPDATE gift_requests SET admin_message_ids=$1, city_key=$2 WHERE id=$3
-        """, ",".join(msg_ids), resolved_city, request_id)
+            UPDATE gift_requests SET admin_message_ids=$1 WHERE id=$2
+        """, ",".join(msg_ids), request_id)
 
     await render(call, await t(uid, "gift_done"))
     await notify_no_username(call, uid)
@@ -3532,8 +3665,6 @@ async def gift_issued(call):
         await conn.execute(
             "UPDATE gift_requests SET status='issued' WHERE id=$1", request_id
         )
-        # Финализируем резерв (stock уже уменьшен при оформлении)
-        await finalize_reserved_stock(conn, -request_id)
 
     await call.answer("✅ Выдано")
 
@@ -3564,8 +3695,6 @@ async def gift_rejected(call):
         await conn.execute(
             "UPDATE gift_requests SET status='rejected' WHERE id=$1", request_id
         )
-        # Возвращаем зарезервированный stock
-        await release_reserved_stock(conn, -request_id)
 
     # Бонус НЕ возвращается — по ТЗ
     await call.answer("❌ Отменено")
@@ -3615,7 +3744,7 @@ async def update_user_stats(uid, order_items, total):
 # ========== СТАРТ ==========
 
 @dp.message_handler(commands=['start'])
-async def start(message: types.Message, state: FSMContext):
+async def start(message: types.Message):
     uid = message.from_user.id
     args = message.get_args()  # например "ref_123456"
 
@@ -3633,12 +3762,6 @@ async def start(message: types.Message, state: FSMContext):
             "UPDATE users SET username=$1 WHERE user_id=$2",
             message.from_user.username, uid
         )
-
-        user_row = await conn.fetchrow(
-            "SELECT language, city FROM users WHERE user_id=$1", uid
-        )
-        has_lang = bool(user_row and user_row["language"])
-        has_city = bool(user_row and user_row["city"])
 
         if is_new_user and args and args.startswith("ref_"):
             try:
@@ -3665,22 +3788,10 @@ async def start(message: types.Message, state: FSMContext):
                         UPDATE users SET ref_bonus=$1 WHERE user_id=$2
                     """, DISCOUNTS["ref"]["new_user"], uid)
 
-    if not has_lang:
-        # Новый пользователь — сначала выбор языка, потом город
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add("🇷🇺 Русский", "🇺🇦 Українська", "🇩🇪 Deutsch")
-        await message.answer("🌍", reply_markup=kb)
-        return
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🇷🇺 Русский", "🇺🇦 Українська", "🇩🇪 Deutsch")
 
-    if not has_city:
-        # Язык есть, города нет — показываем напоминание и выбор города
-        await remind_city_if_needed(message, uid)
-        return
-
-    # Всё есть — показываем меню
-    lang = await get_lang(uid)
-    await message.answer(TEXTS[lang]["menu"], reply_markup=main_menu(lang))
-
+    await message.answer("🌍", reply_markup=kb)
 
 # ========== ЯЗЫК ==========
 
@@ -3701,76 +3812,53 @@ async def set_lang(message: types.Message):
             lang, uid
         )
 
-    # После выбора языка — проверяем, выбран ли город
-    city = await get_user_city(uid)
-    if not city:
-        await message.answer("✅", reply_markup=ReplyKeyboardRemove())
-        # Показываем выбор города (через inline — не ломает reply-клавиатуру)
-        await show_city_selection(message, uid)
-    else:
-        await message.answer("✅", reply_markup=ReplyKeyboardRemove())
+    await message.answer("✅", reply_markup=ReplyKeyboardRemove())
+
+    city = await ensure_user_city(uid)
+    if city:
         await message.answer(TEXTS[lang]["menu"], reply_markup=main_menu(lang))
+    else:
+        await render_city_selection(message, uid)
+
+
+async def render_city_selection(target, uid):
+    cities = await get_all_cities()
+    lang = await get_lang(uid)
+    text = TEXTS[lang]["choose_city"]
+    kb = InlineKeyboardMarkup()
+    for c in cities:
+        name = c.get(f"name_{lang}") or c["name_ru"]
+        kb.add(InlineKeyboardButton(
+            name, callback_data=f"select_city_{c['city_key']}"
+        ))
+    await render(target, text, kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("select_city_"))
+async def select_city(call):
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    city_key = call.data.split("select_city_")[1]
+    city = await get_city(city_key)
+    if not city:
+        await call.answer("❌", show_alert=True)
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET city=$1 WHERE user_id=$2", city_key, uid
+        )
+    await call.answer()
+    lang = await get_lang(uid)
+    await call.message.delete()
+    await bot.send_message(uid, TEXTS[lang]["city_selected"])
+    await bot.send_message(uid, TEXTS[lang]["menu"], reply_markup=main_menu(lang))
 
 @dp.message_handler(lambda m: is_text(m,"language"))
 async def change_lang(message: types.Message):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("🇷🇺 Русский","🇺🇦 Українська","🇩🇪 Deutsch")
     await message.answer(await t(message.from_user.id,"choose_lang"), reply_markup=kb)
-
-
-# ========== ВЫБОР ГОРОДА ==========
-
-@dp.callback_query_handler(lambda c: c.data.startswith("city_select_"), state="*")
-async def city_select_cb(call: types.CallbackQuery, state: FSMContext):
-    """Обрабатывает выбор города или доставки из инлайн-меню."""
-    uid = call.from_user.id
-    choice = call.data.split("city_select_")[1]  # city_key или 'delivery'
-
-    if choice == "delivery":
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET city='delivery', delivery_mode=1 WHERE user_id=$1", uid
-            )
-        confirm_text = await t(uid, "city_delivery_selected")
-    elif choice in CITIES:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET city=$1, delivery_mode=0 WHERE user_id=$2", choice, uid
-            )
-        confirm_text = (await t(uid, "city_selected")).format(city=CITIES[choice]["name"])
-    else:
-        await call.answer()
-        return
-
-    await call.answer(confirm_text)
-    lang = await get_lang(uid)
-
-    # Если пришли из профиля — возвращаемся в профиль
-    back = (await state.get_data()).get("city_select_back")
-    await state.finish()
-
-    if back == "profile":
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
-        await render_profile(call)
-    else:
-        # Первичный выбор (после языка или /start) — показываем главное меню
-        try:
-            await call.message.delete()
-        except Exception:
-            pass
-        await bot.send_message(uid, TEXTS[lang]["menu"], reply_markup=main_menu(lang))
-
-
-@dp.callback_query_handler(lambda c: c.data == "profile_change_city", state="*")
-async def profile_change_city(call: types.CallbackQuery, state: FSMContext):
-    """Запускает выбор города из профиля."""
-    uid = call.from_user.id
-    await state.update_data(city_select_back="profile")
-    await show_city_selection(call, uid, back_cb="profile")
-
 
 # ========== МАГАЗИН ==========
 
@@ -3809,13 +3897,19 @@ async def render_category_selection(target, uid, mode="shop"):
 
 
 async def render_category_shop(target, uid, category):
+    user_city = await get_user_city(uid)
+    stock_pool = await _get_stock_pool(user_city) if user_city else "default"
+
     async with pool.acquire() as conn:
         products = await conn.fetch(
             "SELECT * FROM products WHERE category=$1 ORDER BY id", category
         )
+        pids = [p["id"] for p in products]
+        stocks = {}
+        if user_city and pids:
+            stocks = await get_stocks_batch(conn, pids, user_city, stock_pool)
 
     total_qty = 1
-
     final_price, discount = await calculate_final_price(uid, total_qty)
     base_price = 15
 
@@ -3827,7 +3921,6 @@ async def render_category_shop(target, uid, category):
     text += await t(uid, "choose_product") + "\n\n"
 
     if discount > 0:
-        # Строка о промокоде — выше строки скидки, только если есть promo_discount
         async with pool.acquire() as conn:
             promo_discount = await conn.fetchval(
                 "SELECT promo_discount FROM users WHERE user_id=$1", uid
@@ -3842,28 +3935,24 @@ async def render_category_shop(target, uid, category):
         text += await t(uid, "free_delivery_hint") + "\n\n"
 
     kb = InlineKeyboardMarkup()
-
     lang = await get_lang(uid)
 
     if not products:
         text += await t(uid, "section_empty") + "\n"
 
-    user_city = await get_user_city(uid)
+    for p in products:
+        pid = p["id"]
+        name = p[f"name_{lang}"]
+        has_stock = bool(p["in_stock"]) and stocks.get(pid, 0) > 0
 
-    async with pool.acquire() as conn:
-        for p in products:
-            pid = p["id"]
-            name = p[f"name_{lang}"]
-            stock = await get_stock_for_city(conn, pid, user_city)
+        fav = await is_fav(uid, pid)
+        heart = "❤️" if fav else ""
 
-            fav = await is_fav(uid, pid)
-            heart = "❤️" if fav else ""
+        status = "✅" if has_stock else "❌"
+        text += f"{name} {status} {heart}\n"
 
-            status = "✅" if stock > 0 else "❌"
-            text += f"{name} {status} {heart}\n"
-
-            if stock > 0:
-                kb.add(InlineKeyboardButton(name, callback_data=f"view_{pid}"))
+        if has_stock:
+            kb.add(InlineKeyboardButton(name, callback_data=f"view_{pid}"))
 
     other_category = "elfworld" if category == "elfliq" else "elfliq"
     switch_key = "switch_to_elfworld" if category == "elfliq" else "switch_to_elfliq"
@@ -3885,7 +3974,8 @@ async def shop(message: types.Message):
     if not await check_not_banned(message):
         return
     uid = message.from_user.id
-    if await remind_city_if_needed(message, uid):
+    if not await ensure_user_city(uid):
+        await render_city_selection(message, uid)
         return
     await render_category_selection(message, uid, mode="shop")
 
@@ -4044,28 +4134,6 @@ async def add(call):
             WHERE user_id=$1 AND product_id=$2
         """, uid, pid)
 
-        # Проверяем что в наличии хватает на текущее кол-во + 1 (с учётом города)
-        product_name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
-        user_city = await get_user_city(uid)
-        available = await get_stock_for_city(conn, pid, user_city)
-        current_in_cart = 0
-        if exists:
-            current_in_cart = await conn.fetchval(
-                "SELECT quantity FROM cart WHERE user_id=$1 AND product_id=$2", uid, pid
-            ) or 0
-        if current_in_cart + 1 > available:
-            if available == 0:
-                await call.answer(
-                    (await t(uid, "stock_out")).format(name=product_name),
-                    show_alert=True
-                )
-            else:
-                await call.answer(
-                    (await t(uid, "stock_low")).format(name=product_name, qty=available),
-                    show_alert=True
-                )
-            return
-
         if exists:
             await conn.execute("""
                 UPDATE cart
@@ -4178,26 +4246,6 @@ async def cart_plus(call):
     pid = int(call.data.split("_")[2])
 
     async with pool.acquire() as conn:
-        current_qty = await conn.fetchval(
-            "SELECT quantity FROM cart WHERE user_id=$1 AND product_id=$2", uid, pid
-        ) or 0
-        product_name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
-        user_city = await get_user_city(uid)
-        available = await get_stock_for_city(conn, pid, user_city)
-
-        if current_qty + 1 > available:
-            if available == 0:
-                await call.answer(
-                    (await t(uid, "stock_out")).format(name=product_name),
-                    show_alert=True
-                )
-            else:
-                await call.answer(
-                    (await t(uid, "stock_low")).format(name=product_name, qty=available),
-                    show_alert=True
-                )
-            return
-
         await conn.execute("""
             UPDATE cart
             SET quantity = quantity + 1
@@ -4495,10 +4543,10 @@ async def delivery_refill_gift(call):
 async def pay(call):
     uid = call.from_user.id
 
-    # Проверяем наличие перед переходом к оплате
-    problems = await check_cart_stock(uid)
-    if problems:
-        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
+    stock_errors = await check_cart_stock(uid)
+    if stock_errors:
+        await call.answer(await t(uid, "stock_unavailable"), show_alert=True)
+        await render_cart(call, uid)
         return
 
     cart_mode = await get_cart_mode(uid)
@@ -4527,7 +4575,7 @@ async def cash(call):
 
     kb = InlineKeyboardMarkup()
     kb.add(
-        InlineKeyboardButton(await t(uid,"cancel"), callback_data="open_cart"),
+        InlineKeyboardButton(await t(uid,"cancel"), callback_data="pay"),
         InlineKeyboardButton(await t(uid,"confirm"), callback_data="confirm_cash")
     )
 
@@ -4564,77 +4612,6 @@ async def _build_delivery_admin_block(uid: int) -> str:
 
 
 
-async def check_cart_stock(uid: int) -> list[dict] | None:
-    """
-    Проверяет наличие всех товаров в корзине пользователя с учётом города.
-    Возвращает список проблем: [{"name": ..., "wanted": N, "available": M}] или None если всё OK.
-    """
-    user_city = await get_user_city(uid)
-    async with pool.acquire() as conn:
-        cart_items = await conn.fetch(
-            "SELECT product_id, quantity FROM cart WHERE user_id=$1", uid
-        )
-        if not cart_items:
-            return None
-        problems = []
-        for item in cart_items:
-            pid = item["product_id"]
-            wanted = item["quantity"]
-            name = await conn.fetchval("SELECT name_ru FROM products WHERE id=$1", pid) or f"#{pid}"
-            available = await get_stock_for_city(conn, pid, user_city)
-            if available < wanted:
-                problems.append({
-                    "name": name,
-                    "wanted": wanted,
-                    "available": available,
-                })
-    return problems if problems else None
-
-
-async def reserve_stock_for_order(conn, order_id: int, items_str: str, city_key: str | None = None) -> None:
-    """Резервирует stock при оформлении заказа (уменьшает пул города)."""
-    for part in items_str.split(","):
-        pid_str, qty_str = part.split(":")
-        pid, qty = int(pid_str), int(qty_str)
-        await update_stock_for_city(conn, pid, city_key, -qty)
-        await conn.execute("""
-            INSERT INTO reserved_stock (order_id, product_id, quantity, city_key)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (order_id, product_id) DO UPDATE
-            SET quantity = EXCLUDED.quantity, city_key = EXCLUDED.city_key
-        """, order_id, pid, qty, city_key)
-
-
-async def release_reserved_stock(conn, order_id: int, city_key: str | None = None) -> None:
-    """Возвращает зарезервированный stock при отмене заказа."""
-    rows = await conn.fetch(
-        "SELECT product_id, quantity, city_key FROM reserved_stock WHERE order_id=$1", order_id
-    )
-    for row in rows:
-        # Используем city_key из записи резерва (он был зафиксирован при оформлении)
-        ck = row["city_key"] if row["city_key"] is not None else city_key
-        await update_stock_for_city(conn, row["product_id"], ck, row["quantity"])
-    await conn.execute("DELETE FROM reserved_stock WHERE order_id=$1", order_id)
-
-
-async def finalize_reserved_stock(conn, order_id: int) -> None:
-    """При подтверждении заказа просто удаляем резерв (stock уже уменьшен)."""
-    await conn.execute("DELETE FROM reserved_stock WHERE order_id=$1", order_id)
-
-
-async def _format_stock_errors(uid: int, problems: list[dict]) -> str:
-    """Форматирует список проблем с наличием в текст для пользователя."""
-    lines = []
-    for p in problems:
-        if p["available"] == 0:
-            lines.append((await t(uid, "stock_out")).format(name=p["name"]))
-        else:
-            lines.append((await t(uid, "stock_low_cart")).format(
-                name=p["name"], qty=p["available"]
-            ))
-    return "\n\n".join(lines)
-
-
 @dp.callback_query_handler(lambda c: c.data == "confirm_cash")
 async def confirm_cash(call):
     if not await check_not_banned(call):
@@ -4642,12 +4619,6 @@ async def confirm_cash(call):
 
     uid = call.from_user.id
     username = call.from_user.username or "нет username"
-
-    # Проверяем наличие перед оформлением
-    problems = await check_cart_stock(uid)
-    if problems:
-        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
-        return
 
     async with pool.acquire() as conn:
         cart_items = await conn.fetch("""
@@ -4676,29 +4647,40 @@ async def confirm_cash(call):
 
             text_admin += f"{product['name_ru']} x{r['quantity']}\n"
 
-        user_city = await conn.fetchval("SELECT city FROM users WHERE user_id=$1", uid)
-        resolved_city = get_order_city(user_city)
-
         order_id = await conn.fetchval("""
-            INSERT INTO orders (user_id, items, total, payment, discount, is_delivery, city_key)
-            VALUES ($1, $2, $3, $4, $5, false, $6)
+            INSERT INTO orders (user_id, items, total, payment, discount, is_delivery)
+            VALUES ($1, $2, $3, $4, $5, false)
             RETURNING id
-        """, uid, items_str, total, "cash", discount, resolved_city)
+        """, uid, items_str, total, "cash", discount)
 
-        # Резервируем stock по городу пользователя
-        await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
-
-        await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
+        await conn.execute("""
+            DELETE FROM cart WHERE user_id=$1
+        """, uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
 
     await render(call, await t(uid,"order_done"))
     await notify_no_username(call, uid)
 
-    payment_line = f"Оплата: Наличные\nИТОГО: {total}€"
-    await _send_order_to_admins(
-        order_id, uid, username, text_admin, payment_line,
-        is_delivery=False, city_key=resolved_city
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
+        InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}")
     )
+
+    order_text = f"🏪 Самовывоз | {text_admin}\n\nID: {order_id}\nUser: @{username}\nОплата: Наличные\nИТОГО: {total}€"
+    msg_ids = []
+    for admin in ADMIN_IDS:
+        try:
+            sent = await bot.send_message(admin, order_text, reply_markup=kb)
+            msg_ids.append(f"{admin}:{sent.message_id}")
+        except Exception:
+            pass
+
+    if msg_ids:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE orders SET admin_message_ids=$1 WHERE id=$2
+            """, ",".join(msg_ids), order_id)
 
 # ========== НОВЫЕ СПОСОБЫ ОПЛАТЫ (DELIVERY) ==========
 
@@ -4727,45 +4709,30 @@ async def _get_cart_totals(uid: int):
     return cart_items, eur_total, discount, ",".join(items_str_parts), text_admin
 
 
-async def _create_pending_order(uid: int, items_str: str, eur_total: float, discount: float, payment: str) -> tuple[int, str]:
-    """Создаёт заказ со статусом pending, резервирует stock и очищает корзину.
-    Возвращает (order_id, resolved_city_key)."""
+async def _create_pending_order(uid: int, items_str: str, eur_total: float, discount: float, payment: str) -> int:
+    """Создаёт заказ со статусом pending и очищает корзину."""
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
     async with pool.acquire() as conn:
-        user_city = await conn.fetchval("SELECT city FROM users WHERE user_id=$1", uid)
-        resolved_city = get_order_city(user_city)
-
         order_id = await conn.fetchval("""
-            INSERT INTO orders (user_id, items, total, payment, discount, status, is_delivery, city_key)
-            VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
+            INSERT INTO orders (user_id, items, total, payment, discount, status, is_delivery)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6)
             RETURNING id
-        """, uid, items_str, eur_total, payment, discount, is_delivery, resolved_city)
-        # Резервируем stock по городу пользователя
-        await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
+        """, uid, items_str, eur_total, payment, discount, is_delivery)
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
-    return order_id, resolved_city
+    return order_id
 
 
 async def _send_order_to_admins(order_id: int, uid: int, username: str,
                                  text_admin: str, payment_line: str,
-                                 is_delivery: bool = True,
-                                 city_key: str | None = None) -> None:
-    """
-    Отправляет заказ городским админам (и только им).
-    Высшие админы получают уведомление только ПОСЛЕ подтверждения городским.
-    city_key: ключ из CITIES или None (→ fallback на buerhausen).
-    """
+                                 is_delivery: bool = True) -> None:
+    """Отправляет заказ всем администраторам и сохраняет message_ids."""
     order_type = "🚚 Доставка" if is_delivery else "🏪 Самовывоз"
     delivery_block = await _build_delivery_admin_block(uid) if is_delivery else ""
-    resolved_city = get_order_city(city_key)
-    city_name = CITIES[resolved_city]["name"]
-
     order_text = (
-        f"{order_type} | 🏙 {city_name}\n"
-        f"{text_admin}\n"
+        f"{order_type} | {text_admin}\n"
         f"ID: {order_id}\n"
         f"User: @{username}\n"
         f"{payment_line}"
@@ -4776,13 +4743,8 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
         InlineKeyboardButton("❌ Отменить",    callback_data=f"admin_cancel_{order_id}")
     )
-
-    # Рассылаем только городским админам нужного города
-    city_admin_ids = get_city_admins(resolved_city)
-    recipients = city_admin_ids if city_admin_ids else ADMIN_IDS  # fallback
-
     msg_ids = []
-    for admin in recipients:
+    for admin in ADMIN_IDS:
         try:
             sent = await bot.send_message(admin, order_text, reply_markup=kb)
             msg_ids.append(f"{admin}:{sent.message_id}")
@@ -4791,8 +4753,8 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
     if msg_ids:
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE orders SET admin_message_ids=$1, city_key=$2 WHERE id=$3",
-                ",".join(msg_ids), resolved_city, order_id
+                "UPDATE orders SET admin_message_ids=$1 WHERE id=$2",
+                ",".join(msg_ids), order_id
             )
 
 
@@ -4840,18 +4802,13 @@ async def paid_usdt(call):
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
-    problems = await check_cart_stock(uid)
-    if problems:
-        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
-        return
-
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
         return
     _, eur_total, discount, items_str, text_admin = result
 
-    order_id, resolved_city = await _create_pending_order(uid, items_str, eur_total, discount, "usdt_trc20")
+    order_id = await _create_pending_order(uid, items_str, eur_total, discount, "usdt_trc20")
     payment_line = (
         f"Оплата: USDT TRC20 (ожидает проверки)\n"
         f"Сумма EUR: {eur_str}€\n"
@@ -4859,7 +4816,7 @@ async def paid_usdt(call):
         f"К оплате: {usdt_str} USDT\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -4912,23 +4869,18 @@ async def paid_card_eur(call):
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
-    problems = await check_cart_stock(uid)
-    if problems:
-        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
-        return
-
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
         return
     _, eur_total, discount, items_str, text_admin = result
 
-    order_id, resolved_city = await _create_pending_order(uid, items_str, eur_total, discount, "card_eur")
+    order_id = await _create_pending_order(uid, items_str, eur_total, discount, "card_eur")
     payment_line = (
         f"Оплата: Банковская карта EUR (ожидает проверки)\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -4976,18 +4928,13 @@ async def paid_card_uah(call):
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
-    problems = await check_cart_stock(uid)
-    if problems:
-        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
-        return
-
     result = await _get_cart_totals(uid)
     if not result:
         await render(call, await t(uid, "empty_cart"))
         return
     _, eur_total, discount, items_str, text_admin = result
 
-    order_id, resolved_city = await _create_pending_order(uid, items_str, eur_total, discount, "card_uah")
+    order_id = await _create_pending_order(uid, items_str, eur_total, discount, "card_uah")
     payment_line = (
         f"Оплата: Банковская карта UAH (ожидает проверки)\n"
         f"Сумма EUR: {eur_str}€\n"
@@ -4995,7 +4942,7 @@ async def paid_card_uah(call):
         f"К оплате: {uah_str} UAH\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -5007,7 +4954,7 @@ async def admin_confirm(call):
 
     async with pool.acquire() as conn:
         order = await conn.fetchrow("""
-            SELECT user_id, items, status, admin_message_ids, discount, total, city_key
+            SELECT user_id, items, status, admin_message_ids, discount, total
             FROM orders 
             WHERE id=$1
         """, order_id)
@@ -5016,27 +4963,16 @@ async def admin_confirm(call):
         await call.answer("Заказ уже обработан", show_alert=True)
         return
 
-    # Проверка прав: городской админ может подтверждать только свой город
-    actor_id = call.from_user.id
-    actor_city = get_city_for_admin(actor_id)
-    order_city = order["city_key"] or "buerhausen"
-    if actor_city is not None and actor_city != order_city:
-        await call.answer("❌ Этот заказ относится к другому городу", show_alert=True)
-        return
-
     user_id = order["user_id"]
     items = order["items"]
     msg_ids_raw = order["admin_message_ids"] or ""
     order_discount = order["discount"] or 0
     order_total = order["total"] or 0
-    order_city_name = CITIES.get(order_city, {}).get("name", order_city)
 
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE orders SET status='confirmed' WHERE id=$1", order_id
         )
-        # Финализируем резерв — stock уже уменьшен при оформлении, просто чистим резерв
-        await finalize_reserved_stock(conn, order_id)
 
         old_user = await conn.fetchrow(
             "SELECT total_items, total_orders FROM users WHERE user_id=$1", user_id
@@ -5094,8 +5030,7 @@ async def admin_confirm(call):
 
         new_streak = await _calc_next_streak(
             streak_row["streak_weeks"] or 0,
-            streak_row["last_order_date"],
-            order_city
+            streak_row["last_order_date"]
         )
 
         #    пользователя — начисляем скидку пригласившему ──
@@ -5144,46 +5079,11 @@ async def admin_confirm(call):
 
     await _sync_admin_messages(
         msg_ids_raw=msg_ids_raw,
-        actor_id=actor_id,
+        actor_id=call.from_user.id,
         base_text=call.message.text,
         status_self="\n\n✅ ПОДТВЕРЖДЕНО",
         status_others=f"\n\n✅ ПОДТВЕРЖДЕНО @{admin_username}"
     )
-
-    # Уведомляем высших админов о подтверждённом заказе (если подтвердил городской)
-    if not is_super_admin(actor_id):
-        items_readable = "\n".join(
-            f"  • {part.split(':')[0]} x{part.split(':')[1]}"
-            for part in (items or "").split(",") if ":" in part
-        )
-        # Пытаемся подставить имена товаров (best-effort)
-        try:
-            async with pool.acquire() as conn:
-                items_readable_parts = []
-                for part in (items or "").split(","):
-                    if ":" not in part:
-                        continue
-                    pid_s, qty_s = part.split(":", 1)
-                    name = await conn.fetchval(
-                        "SELECT name_ru FROM products WHERE id=$1", int(pid_s)
-                    )
-                    items_readable_parts.append(f"  • {name or pid_s} x{qty_s}")
-                items_readable = "\n".join(items_readable_parts)
-        except Exception:
-            pass
-
-        super_notify = (
-            f"✅ Заказ #{order_id} подтверждён\n\n"
-            f"🏙 Город: {order_city_name}\n"
-            f"👤 Подтвердил: @{admin_username}\n"
-            f"📦 Товары:\n{items_readable}\n"
-            f"💰 Итого: {order_total}€"
-        )
-        for super_id in SUPER_ADMINS:
-            try:
-                await bot.send_message(super_id, super_notify)
-            except Exception:
-                pass
 
 @dp.callback_query_handler(lambda c: c.data.startswith("admin_cancel_"))
 async def admin_cancel(call):
@@ -5207,8 +5107,6 @@ async def admin_cancel(call):
         await conn.execute(
             "UPDATE orders SET status='cancelled' WHERE id=$1", order_id
         )
-        # Возвращаем зарезервированный stock
-        await release_reserved_stock(conn, order_id)
 
     await call.answer("Отменено")
 
@@ -5302,7 +5200,7 @@ async def promo_cmd(message: types.Message):
 @dp.message_handler(commands=["createpromo"])
 async def createpromo_cmd(message: types.Message):
     """/createpromo discount СУММА КОЛИЧЕСТВО  |  /createpromo freejar КОЛИЧЕСТВО"""
-    if not is_super_admin(message.from_user.id):
+    if not is_admin(message.from_user.id):
         return
 
     uid = message.from_user.id
@@ -5354,115 +5252,100 @@ async def createpromo_cmd(message: types.Message):
     await message.answer(reply, parse_mode="HTML")
 
 
-@dp.message_handler(commands=["freezestreak"])
-async def freezestreak(message: types.Message):
-    """
-    Заморозка Buy Streak по городу.
-    Высший админ: /freezestreak <city|all>
-    Городской админ: /freezestreak  (город определяется автоматически)
-    """
-    uid = message.from_user.id
-    if not is_admin(uid):
+@dp.message_handler(commands=["testprice"])
+async def testprice(message: types.Message):
+    if not is_admin(message.from_user.id):
         return
 
-    actor_city = get_city_for_admin(uid)
+    uid = message.from_user.id
+    args = message.get_args().strip().lower()
 
-    if actor_city is not None:
-        # Городской админ — замораживает только свой город
-        city_keys = [actor_city]
-    else:
-        # Высший админ — требует аргумент
-        arg = message.get_args().strip().lower()
-        if not arg:
-            city_names = " | ".join(CITIES.keys())
-            await message.answer(f"Использование: /freezestreak <{city_names}|all>")
-            return
-        if arg == "all":
-            city_keys = list(CITIES.keys())
-        elif arg in CITIES:
-            city_keys = [arg]
-        else:
-            city_names = " | ".join(CITIES.keys())
-            await message.answer(f"❌ Неизвестный город. Доступно: {city_names} | all")
-            return
+    # Гарантируем существование таблицы при любом вызове команды
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS cart_price_override (
+                user_id BIGINT PRIMARY KEY,
+                override_price REAL
+            )
+        """)
+
+    if args == "reset":
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM cart_price_override WHERE user_id=$1", uid
+            )
+        await message.answer("✅ Тестовая цена сброшена. В корзине снова реальные цены.")
+        return
 
     async with pool.acquire() as conn:
-        frozen_results = []
-        already_frozen = []
-        for ck in city_keys:
-            active = await conn.fetchval("""
-                SELECT 1 FROM streak_freezes
-                WHERE ended_at IS NULL AND city_key = $1 LIMIT 1
-            """, ck)
-            if active:
-                already_frozen.append(CITIES[ck]["name"])
-            else:
-                await conn.execute(
-                    "INSERT INTO streak_freezes (city_key) VALUES ($1)", ck
-                )
-                frozen_results.append(CITIES[ck]["name"])
+        await conn.execute("""
+            INSERT INTO cart_price_override (user_id, override_price)
+            VALUES ($1, 1.0)
+            ON CONFLICT (user_id) DO UPDATE SET override_price = 1.0
+        """, uid)
 
-    parts = []
-    if frozen_results:
-        parts.append(f"❄️ Заморозка стрика включена: {', '.join(frozen_results)}")
-    if already_frozen:
-        parts.append(f"⚠️ Уже была заморожена: {', '.join(already_frozen)}")
-    await message.answer("\n".join(parts))
+    await message.answer(
+        "✅ Тестовая цена активна.\n\n"
+        "Все товары в корзине будут считаться по 1€ за штуку.\n"
+        "Оформи заказ через PayPal и проверь.\n\n"
+        "Для сброса: /testprice reset"
+    )
+async def freezestreak(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
 
+    async with pool.acquire() as conn:
+        active = await conn.fetchval(
+            "SELECT 1 FROM streak_freezes WHERE ended_at IS NULL LIMIT 1"
+        )
+
+        if active:
+            await message.answer("❄️ Заморозка уже активна")
+            return
+
+        await conn.execute(
+            "INSERT INTO streak_freezes (started_at) VALUES (CURRENT_TIMESTAMP)"
+        )
+
+    await message.answer("❄️ Глобальная заморозка Buy Streak включена. "
+                          "Отсчёт времени у всех пользователей остановлен.")
 
 @dp.message_handler(commands=["unfreezestreak"])
 async def unfreezestreak(message: types.Message):
-    """
-    Разморозка Buy Streak по городу.
-    Высший админ: /unfreezestreak <city|all>
-    Городской админ: /unfreezestreak  (город определяется автоматически)
-    """
-    uid = message.from_user.id
-    if not is_admin(uid):
+    if not is_admin(message.from_user.id):
         return
 
-    actor_city = get_city_for_admin(uid)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM streak_freezes WHERE ended_at IS NULL LIMIT 1"
+        )
 
-    if actor_city is not None:
-        city_keys = [actor_city]
-    else:
-        arg = message.get_args().strip().lower()
-        if not arg:
-            city_names = " | ".join(CITIES.keys())
-            await message.answer(f"Использование: /unfreezestreak <{city_names}|all>")
+        if not row:
+            await message.answer("❄️ Заморозка не была активна")
             return
-        if arg == "all":
-            city_keys = list(CITIES.keys())
-        elif arg in CITIES:
-            city_keys = [arg]
-        else:
-            city_names = " | ".join(CITIES.keys())
-            await message.answer(f"❌ Неизвестный город. Доступно: {city_names} | all")
-            return
+
+        await conn.execute(
+            "UPDATE streak_freezes SET ended_at = CURRENT_TIMESTAMP WHERE id=$1",
+            row["id"]
+        )
+
+    await message.answer("🔥 Глобальная заморозка Buy Streak выключена. "
+                          "Отсчёт времени продолжается с того места, где остановился.")
+
+@dp.message_handler(commands=["givefreejar"])
+async def givefreejar(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    uid = message.from_user.id
 
     async with pool.acquire() as conn:
-        unfrozen = []
-        not_frozen = []
-        for ck in city_keys:
-            row = await conn.fetchrow("""
-                SELECT id FROM streak_freezes
-                WHERE ended_at IS NULL AND city_key = $1 LIMIT 1
-            """, ck)
-            if row:
-                await conn.execute(
-                    "UPDATE streak_freezes SET ended_at = CURRENT_TIMESTAMP WHERE id=$1",
-                    row["id"]
-                )
-                unfrozen.append(CITIES[ck]["name"])
-            else:
-                not_frozen.append(CITIES[ck]["name"])
+        await conn.execute(
+            "UPDATE users SET free_jar_bonus = 1 WHERE user_id=$1", uid
+        )
 
-    parts = []
-    if unfrozen:
-        parts.append(f"🔥 Заморозка стрика снята: {', '.join(unfrozen)}")
-    if not_frozen:
-        parts.append(f"⚠️ Не была заморожена: {', '.join(not_frozen)}")
-    await message.answer("\n".join(parts))
+    await message.answer(await t(uid, "givefreejar_done"))
+
 
 # ========== БЛОКИРОВКА ПОЛЬЗОВАТЕЛЕЙ (/ban, /unban) ==========
 
@@ -5494,7 +5377,7 @@ async def _resolve_user(arg: str):
 
 
 async def _handle_ban_command(message: types.Message, banned: bool):
-    if not is_super_admin(message.from_user.id):
+    if not is_admin(message.from_user.id):
         return
 
     arg = message.get_args().strip()
@@ -5536,447 +5419,79 @@ async def unban_cmd(message: types.Message):
     await _handle_ban_command(message, banned=False)
 
 
-# ========== УПРАВЛЕНИЕ НАЛИЧИЕМ ==========
+# ========== УПРАВЛЕНИЕ НАЛИЧИЕМ (/stock, /unstock) ==========
 
 VALID_CATEGORIES = ("elfliq", "elfworld")
 
 
-async def _resolve_stock_targets(conn, category: str, target: str) -> list[int]:
-    """
-    Разбирает target ('all' или '1,2,3') и возвращает список реальных product_id.
-    Числа трактуются как position внутри категории (1, 2, 3...), а не как id.
-    """
-    if target == "all":
-        rows = await conn.fetch(
-            "SELECT id FROM products WHERE category=$1 ORDER BY position", category
-        )
-        return [r["id"] for r in rows]
-    positions = []
-    for part in target.split(","):
-        part = part.strip()
-        if not part.isdigit():
-            return []
-        positions.append(int(part))
-    rows = await conn.fetch(
-        "SELECT id FROM products WHERE category=$1 AND position = ANY($2::int[])",
-        category, positions
-    )
-    return [r["id"] for r in rows]
-
-
-def _stock_city_list() -> str:
-    return ", ".join(CITIES.keys())
-
-
-def _resolve_stock_cities(actor_id: int, city_arg: str) -> list[str] | None:
-    """
-    Возвращает список city_key для команды наличия.
-    - Высший админ: может указать city_key или 'all'
-    - Городской админ: всегда только свой город (city_arg игнорируется)
-    Возвращает None если указан неверный город.
-    """
-    admin_city = get_city_for_admin(actor_id)
-    if admin_city is not None:
-        # Городской админ — только свой город
-        return [admin_city]
-    # Высший админ
-    if city_arg == "all":
-        return list(CITIES.keys())
-    if city_arg in CITIES:
-        return [city_arg]
-    return None  # неверный город
-
-
-async def _apply_stock_change(conn, city_keys: list[str], product_ids: list[int],
-                               mode: str, qty: int) -> None:
-    """
-    mode: 'add' | 'remove' | 'set'
-    Для каждого города применяем изменение к нужному пулу.
-    """
-    for city_key in city_keys:
-        for pid in product_ids:
-            if mode == "add":
-                await update_stock_for_city(conn, pid, city_key, qty)
-            elif mode == "remove":
-                await update_stock_for_city(conn, pid, city_key, -qty)
-            elif mode == "set":
-                await set_stock_for_city(conn, pid, city_key, qty)
-
-
-def _stock_usage_text(uid_lang_hint: str, cmd: str) -> str:
-    city_names = " | ".join(CITIES.keys())
-    return (
-        f"/{cmd} <{city_names}|all> <elfliq|elfworld> <all|N[,N,...]> <кол-во>\n"
-        f"Городской админ: город указывать не нужно.\n"
-        f"Высший админ: укажи город или 'all'."
-    )
-
-
-async def _parse_stock_command(message: types.Message, mode: str):
-    """Общий парсер для /addstock, /removestock, /setstock."""
+async def _handle_stock_command(message: types.Message, in_stock: int):
     if not is_admin(message.from_user.id):
         return
-    uid = message.from_user.id
-    actor_id = uid
+
     parts = message.text.split()
 
-    # Определяем: является ли второй аргумент city или category
-    # Городской админ не указывает город: /addstock elfliq all 5
-    # Высший админ обязан: /addstock buerhausen elfliq all 5
-    admin_city = get_city_for_admin(actor_id)
+    if len(parts) != 3:
+        cmd = parts[0] if parts else "/stock"
+        await message.answer(
+            f"Использование: {cmd} <Elfliq|Elfworld> <product_id|all>"
+        )
+        return
 
-    usage_key = f"{mode}stock_usage"
-    city_list_str = _stock_city_list()
-
-    if admin_city is not None:
-        # Городской админ — 4 части: /cmd category target qty
-        if len(parts) != 4:
-            await message.answer(_stock_usage_text(uid, f"{mode}stock"))
-            return
-        city_arg = None
-        category = parts[1].lower()
-        target = parts[2].lower()
-        qty_str = parts[3]
-        city_keys = [admin_city]
-    else:
-        # Высший админ — 5 частей: /cmd city|all category target qty
-        if len(parts) != 5:
-            await message.answer(
-                (await t(uid, "stock_city_usage")).format(cities=city_list_str)
-            )
-            return
-        city_arg = parts[1].lower()
-        category = parts[2].lower()
-        target = parts[3].lower()
-        qty_str = parts[4]
-        city_keys = _resolve_stock_cities(actor_id, city_arg)
-        if city_keys is None:
-            await message.answer(
-                (await t(uid, "stock_city_invalid")).format(cities=city_list_str)
-            )
-            return
+    category = parts[1].lower()
+    target = parts[2].lower()
 
     if category not in VALID_CATEGORIES:
-        await message.answer(_stock_usage_text(uid, f"{mode}stock"))
+        await message.answer("❌ Неизвестный раздел. Используй Elfliq или Elfworld")
         return
 
-    # setstock теперь поддерживает 'all' так же как addstock/removestock
-    try:
-        qty = int(qty_str)
-        if mode in ("add", "remove") and qty <= 0:
-            raise ValueError
-        if mode == "set" and qty < 0:
-            raise ValueError
-    except ValueError:
-        await message.answer(_stock_usage_text(uid, f"{mode}stock"))
-        return
+    section_label = category.capitalize()
+    action_label = "убраны из наличия" if in_stock == 0 else "возвращены в наличие"
+    action_label_single = "убран из наличия" if in_stock == 0 else "возвращён в наличие"
 
     async with pool.acquire() as conn:
-        ids = await _resolve_stock_targets(conn, category, target)
-        if not ids:
-            await message.answer(_stock_usage_text(uid, f"{mode}stock"))
+        if target == "all":
+            await conn.execute(
+                "UPDATE products SET in_stock=$1 WHERE category=$2",
+                in_stock, category
+            )
+            await message.answer(f"✅ Все товары раздела {section_label} {action_label}")
             return
-        await _apply_stock_change(conn, city_keys, ids, mode, qty)
 
-    await message.answer((await t(uid, "stock_updated")).format(count=len(ids) * len(city_keys)))
-
-
-@dp.message_handler(commands=["addstock"])
-async def addstock_cmd(message: types.Message):
-    """/addstock [city|all] <elfliq|elfworld> <all|N[,N,...]> <кол-во>"""
-    await _parse_stock_command(message, "add")
-
-
-@dp.message_handler(commands=["removestock"])
-async def removestock_cmd(message: types.Message):
-    """/removestock [city|all] <elfliq|elfworld> <all|N[,N,...]> <кол-во>"""
-    await _parse_stock_command(message, "remove")
-
-
-@dp.message_handler(commands=["setstock"])
-async def setstock_cmd(message: types.Message):
-    """/setstock [city|all] <elfliq|elfworld> <N[,N,...]> <кол-во>"""
-    await _parse_stock_command(message, "set")
-
-# ========== СТАТИСТИКА ПРОДАЖ (/sales) ==========
-
-class SalesState(StatesGroup):
-    waiting_date_range = State()
-
-
-def _parse_items_str(items_str: str) -> list[tuple[int, int]]:
-    """Разбирает строку 'pid:qty,pid:qty' → [(pid, qty), ...]"""
-    result = []
-    for part in (items_str or "").split(","):
-        part = part.strip()
-        if ":" not in part:
-            continue
         try:
-            pid, qty = part.split(":", 1)
-            result.append((int(pid), int(qty)))
+            pid = int(target)
         except ValueError:
-            continue
-    return result
+            await message.answer("❌ ID товара должен быть числом или 'all'")
+            return
 
+        row = await conn.fetchrow(
+            "SELECT id, name_ru FROM products WHERE position=$1 AND category=$2",
+            pid, category
+        )
 
-async def _build_sales_report(date_from: date, date_to: date) -> str:
-    """
-    Считает продажи за период [date_from, date_to] включительно.
-    Учитывает только confirmed-заказы (не отменённые и не pending).
-    Бесплатные банки (gift_requests) не учитываются — они не проходят через orders.
-    """
-    async with pool.acquire() as conn:
-        orders = await conn.fetch("""
-            SELECT items, total, discount
-            FROM orders
-            WHERE status = 'confirmed'
-              AND DATE(created_at) >= $1
-              AND DATE(created_at) <= $2
-        """, date_from, date_to)
+        if not row:
+            await message.answer(f"❌ Товар №{pid} не найден в разделе {section_label}")
+            return
 
-        if not orders:
-            return f"📊 Продажи за {date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}\n\nЗаказов не найдено."
+        await conn.execute(
+            "UPDATE products SET in_stock=$1 WHERE id=$2",
+            in_stock, row["id"]
+        )
 
-        # Собираем агрегацию по product_id
-        sales: dict[int, int] = {}  # pid → total_qty
-        total_revenue = 0.0
-
-        for order in orders:
-            # total в заказе — уже итоговая сумма после скидки, это выручка
-            total_revenue += float(order["total"] or 0)
-            for pid, qty in _parse_items_str(order["items"]):
-                sales[pid] = sales.get(pid, 0) + qty
-
-        if not sales:
-            return f"📊 Продажи за {date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}\n\nДанных нет."
-
-        # Загружаем данные о товарах одним запросом
-        pids = list(sales.keys())
-        products_rows = await conn.fetch("""
-            SELECT id, name_ru, price, category
-            FROM products
-            WHERE id = ANY($1::int[])
-        """, pids)
-
-        prod_info: dict[int, dict] = {r["id"]: dict(r) for r in products_rows}
-
-        # Разбивка по категориям
-        by_category: dict[str, list[tuple[str, int, float]]] = {"elfliq": [], "elfworld": []}
-        total_jars = 0
-
-        for pid, qty in sorted(sales.items(), key=lambda x: -x[1]):
-            info = prod_info.get(pid)
-            if not info:
-                continue
-            name = info["name_ru"]
-            price = float(info["price"] or 0)
-            revenue = round(price * qty, 2)
-            cat = info["category"] or "elfliq"
-            by_category.setdefault(cat, []).append((name, qty, revenue))
-            total_jars += qty
-
-    # Формируем отчёт
-    date_label = (
-        date_from.strftime("%d.%m")
-        if date_from == date_to
-        else f"{date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}"
+    await message.answer(
+        f"✅ Товар №{pid} ({row['name_ru']}) {action_label_single} в разделе {section_label}"
     )
-    lines = [f"📊 Продажи за {date_label}\n"]
-
-    for cat_key, cat_label in [("elfliq", "🧪 ELFLIQ"), ("elfworld", "🌍 ELFWORLD")]:
-        items_in_cat = by_category.get(cat_key, [])
-        if not items_in_cat:
-            continue
-        lines.append(f"\n{cat_label}:")
-        for name, qty, rev in items_in_cat:
-            lines.append(f"  {name} — {qty} шт. — {rev:.2f}€")
-
-    lines.append(f"\n────────────────")
-    lines.append(f"Всего банок: {total_jars}")
-    lines.append(f"Выручка: {total_revenue:.2f}€")
-
-    return "\n".join(lines)
 
 
-@dp.message_handler(commands=["sales"])
-async def sales_cmd(message: types.Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        return
-
-    today = date.today()
-    yesterday = today - timedelta(days=1)
-
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("📅 Сегодня",       callback_data="sales_today"),
-        InlineKeyboardButton("📅 Вчера",          callback_data="sales_yesterday"),
-        InlineKeyboardButton("📅 7 дней",         callback_data="sales_7d"),
-        InlineKeyboardButton("📅 30 дней",        callback_data="sales_30d"),
-        InlineKeyboardButton("✏️ Произвольный период", callback_data="sales_custom"),
-    )
-    await message.answer("📊 Выберите период статистики:", reply_markup=kb)
+@dp.message_handler(commands=["stock"])
+async def stock_cmd(message: types.Message):
+    # /stock <Elfliq|Elfworld> <product_id|all> — вернуть товар(ы) в наличие
+    await _handle_stock_command(message, in_stock=1)
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("sales_"), state="*")
-async def sales_period(call: types.CallbackQuery, state: FSMContext):
-    if not is_super_admin(call.from_user.id):
-        return
-
-    await call.answer()
-    today = date.today()
-
-    if call.data == "sales_today":
-        report = await _build_sales_report(today, today)
-        await call.message.edit_text(report, reply_markup=None)
-
-    elif call.data == "sales_yesterday":
-        yesterday = today - timedelta(days=1)
-        report = await _build_sales_report(yesterday, yesterday)
-        await call.message.edit_text(report, reply_markup=None)
-
-    elif call.data == "sales_7d":
-        report = await _build_sales_report(today - timedelta(days=6), today)
-        await call.message.edit_text(report, reply_markup=None)
-
-    elif call.data == "sales_30d":
-        report = await _build_sales_report(today - timedelta(days=29), today)
-        await call.message.edit_text(report, reply_markup=None)
-
-    elif call.data == "sales_custom":
-        await SalesState.waiting_date_range.set()
-        await call.message.edit_text(
-            "✏️ Введите диапазон дат в формате:\n<code>ДД.ММ.ГГГГ-ДД.ММ.ГГГГ</code>\n\nНапример: <code>01.07.2025-10.07.2025</code>",
-            parse_mode="HTML",
-            reply_markup=None,
-        )
-
-
-@dp.message_handler(state=SalesState.waiting_date_range)
-async def sales_custom_dates(message: types.Message, state: FSMContext):
-    if not is_super_admin(message.from_user.id):
-        await state.finish()
-        return
-
-    raw = message.text.strip()
-    try:
-        parts = raw.split("-")
-        # Поддерживаем оба формата: "01.07.2025-10.07.2025" или "01.07-10.07.2025"
-        if len(parts) == 2:
-            date_from = datetime.strptime(parts[0].strip(), "%d.%m.%Y").date()
-            date_to   = datetime.strptime(parts[1].strip(), "%d.%m.%Y").date()
-        else:
-            raise ValueError("bad format")
-    except ValueError:
-        await message.answer(
-            "❌ Неверный формат. Пример: <code>01.07.2025-10.07.2025</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    if date_from > date_to:
-        date_from, date_to = date_to, date_from
-
-    await state.finish()
-    report = await _build_sales_report(date_from, date_to)
-    await message.answer(report)
-
-
-# ========== ПРОСМОТР НАЛИЧИЯ (/inventory) ==========
-
-@dp.message_handler(commands=["inventory"])
-async def inventory_cmd(message: types.Message):
-    """
-    Показывает актуальный остаток товаров.
-    Городской админ видит только свой город.
-    Высший админ видит все города.
-    Дополнительно: /inventory <city> — только нужный город (для высшего).
-    """
-    if not is_admin(message.from_user.id):
-        return
-
-    uid = message.from_user.id
-    actor_city = get_city_for_admin(uid)
-    args = message.get_args().strip().lower()
-
-    # Определяем, какие города показывать
-    if actor_city is not None:
-        # Городской админ — только свой
-        city_keys = [actor_city]
-    elif args and args in CITIES:
-        city_keys = [args]
-    elif args == "all" or not args:
-        city_keys = list(CITIES.keys())
-    else:
-        await message.answer(f"❌ Неверный город. Доступные: {_stock_city_list()}")
-        return
-
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT id, name_ru, stock, category, in_stock
-            FROM products
-            ORDER BY category, position, id
-        """)
-        # Загружаем city_stock для всех нужных городов
-        city_stock_rows = await conn.fetch(
-            "SELECT city_key, product_id, stock FROM city_stock WHERE city_key = ANY($1::text[])",
-            city_keys
-        )
-
-    if not rows:
-        await message.answer("📦 Товаров в базе нет.")
-        return
-
-    # Строим словарь: {(city_key, product_id): stock}
-    cs_map: dict[tuple[str, int], int] = {}
-    for csr in city_stock_rows:
-        cs_map[(csr["city_key"], csr["product_id"])] = csr["stock"]
-
-    cat_labels = {"elfliq": "🧪 ELFLIQ", "elfworld": "🌍 ELFWORLD"}
-
-    lines = ["📦 Текущий остаток товаров\n"]
-
-    for city_key in city_keys:
-        pool_key = CITIES[city_key]["stock_pool"]
-        city_name = CITIES[city_key]["name"]
-        lines.append(f"🏙 {city_name}:")
-
-        by_cat: dict[str, list] = {}
-        for r in rows:
-            cat = r["category"] or "elfliq"
-            by_cat.setdefault(cat, []).append(r)
-
-        total_city = 0
-        oos_city = 0
-
-        for cat_key in ("elfliq", "elfworld"):
-            items = by_cat.get(cat_key, [])
-            if not items:
-                continue
-            lines.append(f"  {cat_labels.get(cat_key, cat_key.upper())}:")
-
-            for r in items:
-                pid = r["id"]
-                if pool_key == "default":
-                    stock = r["stock"] or 0
-                else:
-                    stock = cs_map.get((pool_key, pid), 0)
-
-                name = r["name_ru"]
-                if stock == 0:
-                    status = "❌ нет"
-                    oos_city += 1
-                elif stock <= 3:
-                    status = f"⚠️ {stock} шт."
-                else:
-                    status = f"✅ {stock} шт."
-                total_city += stock
-                lines.append(f"    {name}: {status}")
-
-        lines.append(f"  Итого: {total_city} ед. | Нет: {oos_city} поз.")
-        lines.append("")
-
-    await message.answer("\n".join(lines))
-
+@dp.message_handler(commands=["unstock"])
+async def unstock_cmd(message: types.Message):
+    # /unstock <Elfliq|Elfworld> <product_id|all> — убрать товар(ы) из наличия
+    await _handle_stock_command(message, in_stock=0)
 
 # ========== ЗАПУСК ==========
 
