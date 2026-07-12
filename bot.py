@@ -291,10 +291,6 @@ async def init_db():
             ALTER TABLE orders
             ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
         """)
-        await conn.execute("""
-            ALTER TABLE gift_requests
-            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
-        """)
 
         # ======= ДОСТАВКА =======
         # Текущий режим UI (delivery_mode=true → пользователь видит магазин
@@ -303,7 +299,18 @@ async def init_db():
         # с текущим delivery_mode при добавлении нового товара — блокируем.
         await conn.execute("""
             ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS delivery_mode BOOLEAN DEFAULT false
+            ADD COLUMN IF NOT EXISTS delivery_mode INTEGER DEFAULT 0
+        """)
+        # Приводим к BOOLEAN независимо от того, INTEGER или BOOLEAN уже в схеме
+        await conn.execute("""
+            ALTER TABLE users ALTER COLUMN delivery_mode DROP DEFAULT
+        """)
+        await conn.execute("""
+            ALTER TABLE users
+            ALTER COLUMN delivery_mode TYPE BOOLEAN USING (delivery_mode::integer != 0)
+        """)
+        await conn.execute("""
+            ALTER TABLE users ALTER COLUMN delivery_mode SET DEFAULT false
         """)
         await conn.execute("""
             ALTER TABLE users
@@ -394,8 +401,14 @@ async def init_db():
             username TEXT,
             status TEXT DEFAULT 'pending',
             admin_message_ids TEXT DEFAULT '',
+            city_key TEXT DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+        """)
+        # На уже существующих БД колонки могло не быть
+        await conn.execute("""
+            ALTER TABLE gift_requests
+            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
         """)
 
         # ========== УПРАВЛЕНИЕ ОСТАТКАМИ ==========
