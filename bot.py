@@ -291,6 +291,10 @@ async def init_db():
             ALTER TABLE orders
             ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
         """)
+        await conn.execute("""
+            ALTER TABLE gift_requests
+            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
+        """)
 
         # ======= ДОСТАВКА =======
         # Текущий режим UI (delivery_mode=true → пользователь видит магазин
@@ -299,18 +303,7 @@ async def init_db():
         # с текущим delivery_mode при добавлении нового товара — блокируем.
         await conn.execute("""
             ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS delivery_mode INTEGER DEFAULT 0
-        """)
-        # Приводим к BOOLEAN независимо от того, INTEGER или BOOLEAN уже в схеме
-        await conn.execute("""
-            ALTER TABLE users ALTER COLUMN delivery_mode DROP DEFAULT
-        """)
-        await conn.execute("""
-            ALTER TABLE users
-            ALTER COLUMN delivery_mode TYPE BOOLEAN USING (delivery_mode::integer != 0)
-        """)
-        await conn.execute("""
-            ALTER TABLE users ALTER COLUMN delivery_mode SET DEFAULT false
+            ADD COLUMN IF NOT EXISTS delivery_mode BOOLEAN DEFAULT false
         """)
         await conn.execute("""
             ALTER TABLE users
@@ -401,14 +394,8 @@ async def init_db():
             username TEXT,
             status TEXT DEFAULT 'pending',
             admin_message_ids TEXT DEFAULT '',
-            city_key TEXT DEFAULT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        """)
-        # На уже существующих БД колонки могло не быть
-        await conn.execute("""
-            ALTER TABLE gift_requests
-            ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
         """)
 
         # ========== УПРАВЛЕНИЕ ОСТАТКАМИ ==========
@@ -1922,15 +1909,15 @@ async def set_user_city(uid: int, city: str | None) -> None:
     """Сохраняет город пользователя. city='delivery' → режим доставки."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE users SET city=$1 WHERE user_id=$1", city, uid
+            "UPDATE users SET city=$1 WHERE user_id=$2", city, uid
         )
         if city == "delivery":
             await conn.execute(
-                "UPDATE users SET delivery_mode=1 WHERE user_id=$1", uid
+                "UPDATE users SET delivery_mode=true WHERE user_id=$1", uid
             )
         else:
             await conn.execute(
-                "UPDATE users SET delivery_mode=0 WHERE user_id=$1", uid
+                "UPDATE users SET delivery_mode=false WHERE user_id=$1", uid
             )
 
 
@@ -3742,13 +3729,13 @@ async def city_select_cb(call: types.CallbackQuery, state: FSMContext):
     if choice == "delivery":
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET city='delivery', delivery_mode=1 WHERE user_id=$1", uid
+                "UPDATE users SET city='delivery', delivery_mode=true WHERE user_id=$1", uid
             )
         confirm_text = await t(uid, "city_delivery_selected")
     elif choice in CITIES:
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET city=$1, delivery_mode=0 WHERE user_id=$2", choice, uid
+                "UPDATE users SET city=$1, delivery_mode=false WHERE user_id=$2", choice, uid
             )
         confirm_text = (await t(uid, "city_selected")).format(city=CITIES[choice]["name"])
     else:
