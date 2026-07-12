@@ -1,5 +1,5 @@
 import logging 
-import psycopg2
+import psycopg2 
 import os
 import asyncio
 import asyncpg
