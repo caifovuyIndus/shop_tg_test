@@ -39,7 +39,7 @@ CITIES: dict[str, dict] = {
     "munich": {
         "name": "Munich",
         "stock_pool": "munich",    # отдельный пул = city_stock WHERE city_key='munich'
-        "admins": [1518888796, 5323274376],    # городские админы Munich
+        "admins": [1518888796],    # городские админы Munich
     },
 }
 
