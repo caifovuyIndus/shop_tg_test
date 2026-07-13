@@ -191,14 +191,6 @@ async def alert_super_admins(text: str) -> None:
         except Exception:
             pass
 
-# ========== FSM: ФОРМА ДОСТАВКИ ==========
-
-class DeliveryForm(StatesGroup):
-    name     = State()   # Шаг 1 — Имя Фамилия
-    phone    = State()   # Шаг 2 — Телефон
-    address  = State()   # Шаг 3 — Bundesland. Stadt. Straße
-    tracking = State()   # Шаг 4 — трек-номер или без
-
 class CitySelectContext(StatesGroup):
     """Состояние выбора города (запускается из /start или профиля)."""
     choosing = State()   # ожидаем нажатия кнопки города
@@ -1760,64 +1752,12 @@ def fmt_amount(value) -> str:
     return text or "0"
 
 
-async def get_user_delivery_mode(uid) -> bool:
-    """Текущий режим пользователя: True = доставка, False = самовывоз.
-    Если нужны и lang, и city, и delivery_mode — используй get_user_ctx() вместо этой."""
-    async with pool.acquire() as conn:
-        return bool(await conn.fetchval(
-            "SELECT delivery_mode FROM users WHERE user_id=$1", uid
-        ))
-
-
 async def get_cart_mode(uid) -> str:
     """Режим корзины пользователя: 'pickup' или 'delivery'."""
     async with pool.acquire() as conn:
         return await conn.fetchval(
             "SELECT cart_mode FROM users WHERE user_id=$1", uid
         ) or "pickup"
-
-
-async def get_delivery_data(uid) -> dict:
-    """Возвращает сохранённые данные доставки пользователя или None если не заполнены."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT delivery_saved, delivery_name, delivery_phone,
-                   delivery_address, delivery_tracking
-            FROM users WHERE user_id=$1
-        """, uid)
-    if not row or not row["delivery_saved"]:
-        return None
-    return {
-        "name": row["delivery_name"],
-        "phone": row["delivery_phone"],
-        "address": row["delivery_address"],
-        "tracking": row["delivery_tracking"],
-    }
-
-
-async def format_delivery_block(uid, data: dict) -> str:
-    """Форматирует блок данных доставки для показа пользователю."""
-    addr_parts = (data["address"] or "").split("|")
-    bundesland = addr_parts[0] if len(addr_parts) > 0 else ""
-    stadt = addr_parts[1] if len(addr_parts) > 1 else ""
-    strasse = addr_parts[2] if len(addr_parts) > 2 else ""
-
-    tracking_label = await t(uid, "delivery_tracking_yes_label" if data["tracking"] else "delivery_tracking_no_label")
-
-    text = (
-        f"{await t(uid,'delivery_confirm_title')}\n\n"
-        f"{await t(uid,'delivery_field_name')}\n{data['name']}\n\n"
-        f"{await t(uid,'delivery_field_phone')}\n{data['phone']}\n\n"
-        f"{await t(uid,'delivery_field_address')}\n{bundesland}\n{stadt}\n{strasse}\n\n"
-        f"{await t(uid,'delivery_field_tracking')} {tracking_label}"
-    )
-    return text
-
-# ========== КУРСЫ ВАЛЮТ ==========
-
-# Кэш курсов для каждого пользователя: {uid: {"usdt": (rate, ts), "uah": (rate, ts)}}
-_rate_cache: dict = {}
-_RATE_TTL = 1800  # 30 минут
 
 
 async def _fetch_eur_usdt() -> float | None:
@@ -2034,21 +1974,20 @@ async def get_effective_streak(uid) -> int:
 
 async def get_user_ctx(uid: int) -> dict:
     """
-    Один SELECT вместо get_lang() + get_user_city() + get_user_delivery_mode().
+    Один SELECT вместо get_lang() + get_user_city().
     Возвращает dict с ключами: lang, city, delivery_mode, banned.
     Используй везде где нужно 2+ из этих полей в одном хендлере.
     """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT language, city, delivery_mode, banned FROM users WHERE user_id=$1", uid
+            "SELECT language, city, banned FROM users WHERE user_id=$1", uid
         )
     if not row:
-        return {"lang": "ru", "city": None, "delivery_mode": False, "banned": False}
+        return {"lang": "ru", "city": None, "banned": False}
     return {
-        "lang":          row["language"] or "ru",
-        "city":          row["city"],
-        "delivery_mode": bool(row["delivery_mode"]),
-        "banned":        bool(row["banned"]),
+        "lang":   row["language"] or "ru",
+        "city":   row["city"],
+        "banned": bool(row["banned"]),
     }
 
 
@@ -2113,12 +2052,11 @@ async def get_user_city(uid: int) -> str | None:
 
 
 async def set_user_city(uid: int, city: str | None) -> None:
-    """Сохраняет город пользователя. city='delivery' → delivery_mode=true."""
-    delivery = city == "delivery"
+    """Сохраняет город пользователя."""
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE users SET city=$1, delivery_mode=$2 WHERE user_id=$3",
-            city, delivery, uid
+            "UPDATE users SET city=$1 WHERE user_id=$2",
+            city, uid
         )
 
 
@@ -2131,10 +2069,6 @@ async def show_city_selection(target, uid: int, *, back_cb: str | None = None) -
             f"🏙 {cfg['name']}",
             callback_data=f"city_select_{city_key}"
         ))
-    kb.add(InlineKeyboardButton(
-        await t(uid, "city_delivery_btn"),
-        callback_data="city_select_delivery"
-    ))
     if back_cb:
         kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data=back_cb))
     await render(target, text, kb)
@@ -2155,10 +2089,6 @@ async def remind_city_if_needed(target, uid: int) -> bool:
             f"🏙 {cfg['name']}",
             callback_data=f"city_select_{city_key}"
         ))
-    kb.add(InlineKeyboardButton(
-        await t(uid, "city_delivery_btn"),
-        callback_data="city_select_delivery"
-    ))
     if isinstance(target, types.Message):
         await target.answer(text, reply_markup=kb)
     else:
@@ -2330,7 +2260,7 @@ async def render_profile(target):
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT total_items, total_orders, total_saved, delivery_saved,
+            SELECT total_items, total_orders, total_saved,
                    promo_discount, promo_code, promo_type, city
             FROM users WHERE user_id=$1
         """, uid)
@@ -2338,7 +2268,6 @@ async def render_profile(target):
     items = row["total_items"] or 0
     orders = row["total_orders"] or 0
     saved = row["total_saved"] or 0
-    has_delivery = bool(row["delivery_saved"])
     promo_discount = row["promo_discount"] or 0
     promo_code = row["promo_code"]
     promo_type = row["promo_type"]
@@ -2351,9 +2280,7 @@ async def render_profile(target):
     total_discount = await calculate_total_discount(uid, 1)
 
     # Строка города
-    if user_city == "delivery":
-        city_line = await t(uid, "profile_city_delivery")
-    elif user_city and user_city in CITIES:
+    if user_city and user_city in CITIES:
         city_line = (await t(uid, "profile_city_row")).format(city=CITIES[user_city]["name"])
     else:
         city_line = await t(uid, "profile_city_none")
@@ -2396,13 +2323,6 @@ async def render_profile(target):
         InlineKeyboardButton(await t(uid,"favorites"), callback_data="profile_fav"),
         InlineKeyboardButton(await t(uid,"stats"), callback_data="profile_stats"),
     )
-    if has_delivery:
-        kb.add(
-            InlineKeyboardButton(
-                await t(uid, "delivery_address_profile_btn"),
-                callback_data="profile_delivery"
-            )
-        )
     kb.add(
         InlineKeyboardButton(
             await t(uid, "profile_change_city"),
@@ -2423,35 +2343,6 @@ async def profile(message: types.Message):
 async def profile_cb(call):
     await render_profile(call)
 
-  
-@dp.callback_query_handler(lambda c: c.data == "profile_delivery")
-async def profile_delivery(call):
-    uid = call.from_user.id
-    delivery_data = await get_delivery_data(uid)
-
-    if not delivery_data:
-        await call.answer()
-        return
-
-    text = await format_delivery_block(uid, delivery_data)
-
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(await t(uid, "delivery_refill_profile_btn"), callback_data="profile_delivery_refill"))
-    kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data="profile"))
-
-    await render(call, text, kb)
-
-
-@dp.callback_query_handler(lambda c: c.data == "profile_delivery_refill")
-async def profile_delivery_refill(call):
-    """Перезаполнение данных доставки из профиля."""
-    uid = call.from_user.id
-    await call.answer()
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-    await start_delivery_form(call, uid)
 
 # ========== ИЗБРАННОЕ ==========
 
@@ -2674,24 +2565,18 @@ async def repeat_order(call):
         return
 
     items_str = order["items"]
-    is_delivery = bool(order["is_delivery"])
-    cart_mode = "delivery" if is_delivery else "pickup"
 
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
-        # Восстанавливаем режим из оригинального заказа
-        await conn.execute(
-            "UPDATE users SET delivery_mode=$1, cart_mode=$2 WHERE user_id=$3",
-            1 if is_delivery else 0, cart_mode, uid
-        )
+        await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
 
         for item in items_str.split(","):
             pid, qty = item.split(":")
             pid, qty = int(pid), int(qty)
             await conn.execute("""
                 INSERT INTO cart (user_id, product_id, quantity, cart_mode)
-                VALUES ($1, $2, $3, $4)
-            """, uid, pid, qty, cart_mode)
+                VALUES ($1, $2, $3, 'pickup')
+            """, uid, pid, qty)
 
     await render_cart(call, uid)
 
@@ -3157,82 +3042,23 @@ async def open_gift_shop(call):
         await call.answer(await t(uid, "gift_already_used"), show_alert=True)
         return
 
-    # Показываем выбор: доставка или самовывоз
-    text = await t(uid, "choose_section") + "\n\n" + await t(uid, "gift_delivery_free_hint")
-
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton(await t(uid, "gift_delivery_label"), callback_data="gift_mode_delivery"),
-        InlineKeyboardButton(await t(uid, "gift_pickup_label"),   callback_data="gift_mode_pickup"),
-    )
-    kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data="profile_roulette"))
-
-    await render(call, text, kb)
+    # Сразу показываем выбор категории (самовывоз)
+    await render_category_selection_gift(call, uid)
 
 
-@dp.callback_query_handler(lambda c: c.data in ("gift_mode_delivery", "gift_mode_pickup"))
-async def gift_mode_select(call):
-    if not await check_not_banned(call):
-        return
 
-    uid = call.from_user.id
-    is_delivery = (call.data == "gift_mode_delivery")
-
-    async with pool.acquire() as conn:
-        bonus = await conn.fetchval(
-            "SELECT free_jar_bonus FROM users WHERE user_id=$1", uid
-        )
-
-    if not bonus:
-        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
-        return
-
-    # Если выбрана доставка — проверяем, есть ли сохранённые данные
-    if is_delivery:
-        delivery_data = await get_delivery_data(uid)
-        if not delivery_data:
-            # Сохраняем флаг «доставка для подарка» и запускаем форму
-            await call.answer()
-            # Используем delivery_confirmed_save-сценарий: после заполнения
-            # пользователь подтверждает → его ведут обратно в gift-магазин
-            # Для этого передаём контекст через callback_data после подтверждения
-            await _gift_start_delivery_form(call, uid)
-            return
-
-    # Запоминаем выбранный режим в state через пустой FSM (не нужен),
-    # просто передаём через callback_data в каталог
-    cat_prefix = "gift_delivery_cat_" if is_delivery else "gift_cat_"
-    await render_category_selection_gift(call, uid, is_delivery=is_delivery)
-
-
-async def render_category_selection_gift(target, uid, is_delivery: bool):
-    """Выбор раздела каталога для бесплатной банки (с учётом режима доставки)."""
+async def render_category_selection_gift(target, uid, is_delivery: bool = False):
+    """Выбор раздела каталога для бесплатной банки."""
     text = await t(uid, "choose_section")
-    if is_delivery:
-        text += "\n\n" + await t(uid, "gift_delivery_free_hint")
-
-    prefix = "gift_delivery_cat_" if is_delivery else "gift_cat_"
     kb = InlineKeyboardMarkup()
     kb.add(
-        InlineKeyboardButton(await t(uid, "section_elfliq"),   callback_data=f"{prefix}elfliq"),
-        InlineKeyboardButton(await t(uid, "section_elfworld"), callback_data=f"{prefix}elfworld"),
+        InlineKeyboardButton(await t(uid, "section_elfliq"),   callback_data="gift_cat_elfliq"),
+        InlineKeyboardButton(await t(uid, "section_elfworld"), callback_data="gift_cat_elfworld"),
     )
     kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data="open_gift_shop"))
 
     await render(target, text, kb)
 
-
-async def _gift_start_delivery_form(call, uid):
-    """Запускает форму доставки из режима подарка."""
-    await call.answer()
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-    await DeliveryForm.name.set()
-    sent = await bot.send_message(uid, await t(uid, "delivery_step_name"), reply_markup=ReplyKeyboardRemove())
-    # from_pay=False — после подтверждения адреса открываем профиль, не оплату
-    await dp.storage.update_data(chat=uid, user=uid, data={"last_bot_msg": sent.message_id, "from_pay": False, "gift_flow": True})
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_cat_"))
@@ -3252,27 +3078,9 @@ async def gift_category(call):
         return
 
     category = call.data.split("gift_cat_")[1]
-    await render_gift_shop(call, uid, category, is_delivery=False)
+    await render_gift_shop(call, uid, category)
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("gift_delivery_cat_"))
-async def gift_delivery_category(call):
-    if not await check_not_banned(call):
-        return
-
-    uid = call.from_user.id
-
-    async with pool.acquire() as conn:
-        bonus = await conn.fetchval(
-            "SELECT free_jar_bonus FROM users WHERE user_id=$1", uid
-        )
-
-    if not bonus:
-        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
-        return
-
-    category = call.data.split("gift_delivery_cat_")[1]
-    await render_gift_shop(call, uid, category, is_delivery=True)
 
 
 async def render_gift_shop(target, uid, category, is_delivery: bool = False):
@@ -3288,22 +3096,20 @@ async def render_gift_shop(target, uid, category, is_delivery: bool = False):
     text = f"{await t(uid, section_key)}\n\n"
     text += await t(uid, "choose_gift") + "\n\n"
 
-    if is_delivery:
-        text += await t(uid, "gift_delivery_free_hint") + "\n\n"
 
     kb = InlineKeyboardMarkup()
 
     if not products:
         text += await t(uid, "section_empty") + "\n"
 
-    prefix = "gift_delivery_view_" if is_delivery else "gift_view_"
+    prefix = "gift_view_"
     for p in products:
         pid = p["id"]
         name = p[f"name_{lang}"]
         text += f"{name}\n"
         kb.add(InlineKeyboardButton(name, callback_data=f"{prefix}{pid}"))
 
-    back_cb = "gift_delivery_cat_" + category if is_delivery else "open_gift_shop"
+    back_cb = "open_gift_shop"
     kb.add(InlineKeyboardButton(await t(uid, "back"), callback_data=back_cb))
 
     await render(target, text, kb)
@@ -3344,43 +3150,6 @@ async def gift_view(call):
 
     await render(call, text, kb, photo=img)
 
-
-@dp.callback_query_handler(lambda c: c.data.startswith("gift_delivery_view_"))
-async def gift_delivery_view(call):
-    """Просмотр товара для бесплатной банки в режиме доставки."""
-    if not await check_not_banned(call):
-        return
-
-    uid = call.from_user.id
-    pid = int(call.data.split("gift_delivery_view_")[1])
-
-    async with pool.acquire() as conn:
-        bonus = await conn.fetchval(
-            "SELECT free_jar_bonus FROM users WHERE user_id=$1", uid
-        )
-
-    if not bonus:
-        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
-        return
-
-    async with pool.acquire() as conn:
-        p = await conn.fetchrow("SELECT * FROM products WHERE id=$1", pid)
-
-    lang = await get_lang(uid)
-    name = p[f"name_{lang}"]
-    desc = p[f"desc_{lang}"]
-    img = p["image"]
-    category = p["category"] or "elfliq"
-
-    text = f"{name}\n\n{desc}"
-
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("⬅️", callback_data=f"gift_delivery_cat_{category}"),
-        InlineKeyboardButton(await t(uid, "select_gift_btn"), callback_data=f"gift_delivery_confirm_{pid}")
-    )
-
-    await render(call, text, kb, photo=img)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_confirm_"))
 async def gift_confirm(call):
@@ -3431,56 +3200,6 @@ async def gift_confirm(call):
 
     await render(call, text, kb)
 
-
-@dp.callback_query_handler(lambda c: c.data.startswith("gift_delivery_confirm_"))
-async def gift_delivery_confirm(call):
-    """Экран подтверждения выбора товара для доставки."""
-    if not await check_not_banned(call):
-        return
-
-    uid = call.from_user.id
-    pid = int(call.data.split("gift_delivery_confirm_")[1])
-
-    async with pool.acquire() as conn:
-        bonus = await conn.fetchval(
-            "SELECT free_jar_bonus FROM users WHERE user_id=$1", uid
-        )
-
-    if not bonus:
-        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
-        return
-
-    # Проверяем наличие выбранного товара по городу пользователя
-    user_city = await get_user_city(uid)
-    async with pool.acquire() as conn:
-        p = await conn.fetchrow(
-            "SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid
-        )
-        stock = await get_stock_for_city(conn, pid, user_city)
-
-    if not p or stock <= 0:
-        await call.answer(
-            (await t(uid, "stock_out")).format(name=p["name_ru"] if p else f"#{pid}"),
-            show_alert=True
-        )
-        return
-
-    lang = await get_lang(uid)
-    name = p[f"name_{lang}"]
-
-    text = (
-        f"{await t(uid, 'gift_confirm_title')}\n\n"
-        f"{name}\n\n"
-        f"{await t(uid, 'gift_confirm_question')}"
-    )
-
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton(await t(uid, "confirm"), callback_data=f"gift_delivery_apply_{pid}"),
-        InlineKeyboardButton(await t(uid, "gift_cancel"), callback_data=f"gift_delivery_view_{pid}")
-    )
-
-    await render(call, text, kb)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_apply_"))
 async def gift_apply(call):
@@ -3596,163 +3315,6 @@ async def gift_apply(call):
     await notify_no_username(call, uid)
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("gift_delivery_apply_"))
-async def gift_delivery_apply(call):
-    """Финальное подтверждение бесплатной банки с доставкой."""
-    if not await check_not_banned(call):
-        return
-
-    uid = call.from_user.id
-    pid = int(call.data.split("gift_delivery_apply_")[1])
-    username = call.from_user.username or "unknown"
-
-    user_city = await get_user_city(uid)
-    resolved_city = get_order_city(user_city)
-    pool_key = get_stock_pool(user_city)
-    lang = await get_lang(uid)
-
-    async with pool.acquire() as conn:
-        p = await conn.fetchrow("SELECT name_ru, name_ua, name_de FROM products WHERE id=$1", pid)
-    if not p:
-        await call.answer(await t(uid, "gift_already_used"), show_alert=True)
-        return
-
-    name_ru = p["name_ru"]
-    name = p[f"name_{lang}"]
-
-    # Атомарная транзакция: FOR UPDATE на stock + списание бонуса + резервирование
-    async with pool.acquire() as conn:
-        try:
-            async with conn.transaction():
-                if pool_key == "default":
-                    avail = await conn.fetchval(
-                        "SELECT stock FROM products WHERE id=$1 FOR UPDATE", pid
-                    )
-                else:
-                    avail = await conn.fetchval(
-                        "SELECT stock FROM city_stock WHERE city_key=$1 AND product_id=$2 FOR UPDATE",
-                        pool_key, pid
-                    ) or 0
-
-                if not avail or avail <= 0:
-                    raise Exception("stock_out")
-
-                updated = await conn.fetchval("""
-                    UPDATE users SET free_jar_bonus = 0
-                    WHERE user_id=$1 AND free_jar_bonus = 1
-                    RETURNING user_id
-                """, uid)
-                if not updated:
-                    raise Exception("bonus_used")
-
-                request_id = await conn.fetchval("""
-                    INSERT INTO gift_requests (user_id, product_id, username)
-                    VALUES ($1, $2, $3) RETURNING id
-                """, uid, pid, username)
-
-                await update_stock_for_city(conn, pid, user_city, -1)
-
-                await conn.execute("""
-                    INSERT INTO reserved_stock (order_id, product_id, quantity, city_key)
-                    VALUES ($1, $2, 1, $3)
-                    ON CONFLICT (order_id, product_id) DO UPDATE
-                    SET quantity = 1, city_key = EXCLUDED.city_key
-                """, -request_id, pid, resolved_city)
-
-        except Exception as e:
-            if "stock_out" in str(e):
-                await call.answer(
-                    (await t(uid, "stock_out")).format(name=name_ru), show_alert=True
-                )
-            elif "bonus_used" in str(e):
-                await call.answer(await t(uid, "gift_already_used"), show_alert=True)
-            else:
-                logger.error("gift_delivery_apply error uid=%s pid=%s: %s", uid, pid, e)
-                await alert_super_admins(f"gift_delivery_apply: ошибка uid={uid} pid={pid}: {e}")
-            return
-
-    city_admin_ids = get_city_admins(resolved_city) or ADMIN_IDS
-
-    # Блок данных доставки для администратора
-    delivery_block = await _build_delivery_admin_block(uid)
-
-    admin_text = (
-        f"🎁 Бесплатная банка (ДОСТАВКА)\n\n"
-        f"🏙 Город: {CITIES.get(resolved_city, {}).get('name', resolved_city)}\n"
-        f"Пользователь: @{username}\n\n"
-        f"Выбранный товар:\n{name_ru}"
-        f"{delivery_block}"
-    )
-
-    admin_kb = InlineKeyboardMarkup()
-    admin_kb.add(
-        InlineKeyboardButton("✅ Выдано", callback_data=f"gift_issued_{request_id}"),
-        InlineKeyboardButton("❌ Отменить", callback_data=f"gift_rejected_{request_id}")
-    )
-
-    msg_ids = []
-    for admin_id in city_admin_ids:
-        try:
-            sent = await bot.send_message(admin_id, admin_text, reply_markup=admin_kb)
-            msg_ids.append(f"{admin_id}:{sent.message_id}")
-        except Exception:
-            pass
-
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE gift_requests SET admin_message_ids=$1, city_key=$2 WHERE id=$3
-        """, ",".join(msg_ids), resolved_city, request_id)
-
-    await render(call, await t(uid, "gift_done"))
-    await notify_no_username(call, uid)
-
-
-async def _sync_gift_admins(request_id: int, status_line: str):
-    """Обновляет или пересылает сообщение всем админам по заявке на подарок."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT admin_message_ids FROM gift_requests WHERE id=$1", request_id
-        )
-    if not row or not row["admin_message_ids"]:
-        return
-
-    for entry in row["admin_message_ids"].split(","):
-        if ":" not in entry:
-            continue
-        admin_id, msg_id = int(entry.split(":")[0]), int(entry.split(":")[1])
-        try:
-            await bot.edit_message_text(
-                chat_id=admin_id, message_id=msg_id, text=status_line
-            )
-        except Exception:
-            try:
-                await bot.delete_message(chat_id=admin_id, message_id=msg_id)
-                await bot.send_message(admin_id, status_line)
-            except Exception:
-                pass
-
-async def _sync_admin_messages(msg_ids_raw: str, actor_id: int,
-                                base_text: str, status_self: str, status_others: str):
-    """
-    Обновляет сообщения у всех админов с учётом того, кто нажал кнопку.
-    actor_id    — Telegram ID администратора, который нажал кнопку
-    status_self — строка-суффикс для нажавшего (без username)
-    status_others — строка-суффикс для остальных (с @username)
-    """
-    for entry in (msg_ids_raw or "").split(","):
-        if ":" not in entry:
-            continue
-        a_id, m_id = int(entry.split(":")[0]), int(entry.split(":")[1])
-        suffix = status_self if a_id == actor_id else status_others
-        text = base_text + suffix
-        try:
-            await bot.edit_message_text(chat_id=a_id, message_id=m_id, text=text)
-        except Exception:
-            try:
-                await bot.delete_message(chat_id=a_id, message_id=m_id)
-                await bot.send_message(a_id, text)
-            except Exception:
-                pass
 
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_issued_"))
 async def gift_issued(call):
@@ -3971,18 +3533,12 @@ async def change_lang(message: types.Message):
 async def city_select_cb(call: types.CallbackQuery, state: FSMContext):
     """Обрабатывает выбор города или доставки из инлайн-меню."""
     uid = call.from_user.id
-    choice = call.data.split("city_select_")[1]  # city_key или 'delivery'
+    choice = call.data.split("city_select_")[1]  # city_key
 
-    if choice == "delivery":
+    if choice in CITIES:
         async with pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET city='delivery', delivery_mode=1 WHERE user_id=$1", uid
-            )
-        confirm_text = await t(uid, "city_delivery_selected")
-    elif choice in CITIES:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET city=$1, delivery_mode=0 WHERE user_id=$2", choice, uid
+                "UPDATE users SET city=$1 WHERE user_id=$2", choice, uid
             )
         confirm_text = (await t(uid, "city_selected")).format(city=CITIES[choice]["name"])
     else:
@@ -4027,12 +3583,7 @@ async def render_category_selection(target, uid, mode="shop"):
     для бесплатной банки (без цен и корзины)."""
     prefix = "shop_cat_" if mode == "shop" else "gift_cat_"
 
-    delivery = await get_user_delivery_mode(uid) if mode == "shop" else False
-
     text = await t(uid, "choose_section")
-
-    if mode == "shop":
-        text += "\n\n" + await t(uid, "free_delivery_hint")
 
     kb = InlineKeyboardMarkup()
     kb.add(
@@ -4041,10 +3592,6 @@ async def render_category_selection(target, uid, mode="shop"):
     )
 
     if mode == "shop":
-        # Кнопка переключения режима — показывает, что сейчас активно,
-        # и предлагает переключиться на противоположное.
-        toggle_label = await t(uid, "delivery_mode_off" if delivery else "delivery_mode_on")
-        kb.add(InlineKeyboardButton(toggle_label, callback_data="toggle_delivery_mode"))
         kb.add(
             InlineKeyboardButton(await t(uid,"cart"), callback_data="open_cart"),
             InlineKeyboardButton(await t(uid,"profile"), callback_data="profile")
@@ -4059,7 +3606,6 @@ async def render_category_shop(target, uid, category):
     # Один SELECT для lang + city + delivery_mode (вместо 3 отдельных roundtrip)
     ctx = await get_user_ctx(uid)
     lang = ctx["lang"]
-    delivery = ctx["delivery_mode"]
     pool_key = get_stock_pool(ctx["city"])
 
     # Один SELECT для products + user_discounts + promo (батч)
@@ -4098,8 +3644,7 @@ async def render_category_shop(target, uid, category):
     final_price, discount = await calculate_final_price(uid, total_qty)
 
     section_key = "section_elfliq" if category == "elfliq" else "section_elfworld"
-    mode_label = TEXTS[lang]["delivery_mode_on" if delivery else "delivery_mode_off"]
-    text = f"{TEXTS[lang][section_key]} | {mode_label}\n\n"
+    text = f"{TEXTS[lang][section_key]}\n\n"
     text += TEXTS[lang]["choose_product"] + "\n\n"
 
     if discount > 0:
@@ -4108,9 +3653,6 @@ async def render_category_shop(target, uid, category):
         text += f"💰 {BASE_PRICE}€ → {final_price}€ (-{discount}€)\n\n"
     else:
         text += f"💰 {BASE_PRICE}€\n\n"
-
-    if delivery:
-        text += TEXTS[lang]["free_delivery_hint"] + "\n\n"
 
     kb = InlineKeyboardMarkup()
 
@@ -4131,10 +3673,6 @@ async def render_category_shop(target, uid, category):
     switch_key = "switch_to_elfworld" if category == "elfliq" else "switch_to_elfliq"
 
     kb.add(InlineKeyboardButton(TEXTS[lang][switch_key], callback_data=f"shop_cat_{other_category}"))
-    kb.add(InlineKeyboardButton(
-        TEXTS[lang]["delivery_mode_off" if delivery else "delivery_mode_on"],
-        callback_data=f"toggle_delivery_mode_cat_{category}"
-    ))
     kb.add(
         InlineKeyboardButton(TEXTS[lang]["cart"],    callback_data="open_cart"),
         InlineKeyboardButton(TEXTS[lang]["profile"], callback_data="profile")
@@ -4159,53 +3697,6 @@ async def shop_category(call):
     await call.answer()
     category = call.data.split("shop_cat_")[1]
     await render_category_shop(call, call.from_user.id, category)
-
-@dp.callback_query_handler(lambda c: c.data == "toggle_delivery_mode" or c.data.startswith("toggle_delivery_mode_cat_"))
-async def toggle_delivery_mode(call):
-    if not await check_not_banned(call):
-        return
-
-    uid = call.from_user.id
-
-    # Определяем контекст: находимся ли мы внутри конкретного раздела
-    category = None
-    if call.data.startswith("toggle_delivery_mode_cat_"):
-        category = call.data.split("toggle_delivery_mode_cat_")[1]
-
-    async with pool.acquire() as conn:
-        user = await conn.fetchrow("""
-            SELECT delivery_mode, cart_mode FROM users WHERE user_id=$1
-        """, uid)
-
-        cart_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM cart WHERE user_id=$1", uid
-        )
-
-    current_delivery = bool(user["delivery_mode"])
-    new_delivery = not current_delivery
-    new_mode_str = "delivery" if new_delivery else "pickup"
-
-    # Если корзина не пуста и её режим не совпадает — блокируем переключение
-    if cart_count > 0:
-        cart_mode = user["cart_mode"] or "pickup"
-        if cart_mode != new_mode_str:
-            await call.answer(await t(uid, "delivery_cart_conflict"), show_alert=True)
-            return
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET delivery_mode=$1 WHERE user_id=$2", new_delivery, uid
-        )
-
-    toggle_key = "delivery_mode_toggle_on" if new_delivery else "delivery_mode_toggle_off"
-    await call.answer(await t(uid, toggle_key))
-
-    # Редактируем текущее сообщение: если были в разделе — остаёмся в нём,
-    # если на экране выбора раздела — обновляем его (аналогично elfliq/elfworld)
-    if category:
-        await render_category_shop(call, uid, category)
-    else:
-        await render_category_selection(call, uid, mode="shop")
 
 @dp.callback_query_handler(lambda c: c.data == "open_cart")
 async def open_cart(call):
@@ -4283,24 +3774,7 @@ async def add(call):
     uid = call.from_user.id
     pid = int(call.data.split("_")[1])
 
-    delivery = await get_user_delivery_mode(uid)
-    new_mode = "delivery" if delivery else "pickup"
-
     async with pool.acquire() as conn:
-        cart_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM cart WHERE user_id=$1", uid
-        )
-
-        # Если корзина не пуста — проверяем совместимость режимов
-        if cart_count > 0:
-            cart_mode = await conn.fetchval(
-                "SELECT cart_mode FROM users WHERE user_id=$1", uid
-            ) or "pickup"
-
-            if cart_mode != new_mode:
-                await call.answer(await t(uid, "delivery_cart_conflict"), show_alert=True)
-                return
-
         exists = await conn.fetchrow("""
             SELECT 1 FROM cart
             WHERE user_id=$1 AND product_id=$2
@@ -4394,11 +3868,6 @@ async def render_cart(target, uid):
 
     if discount > 0:
         text += "\n" + (await t(uid,"savings")).format(value=discount)
-
-    # Подсказка про бесплатную доставку — только в режиме доставки
-    cart_mode = await get_cart_mode(uid)
-    if cart_mode == "delivery":
-        text += "\n\n" + await t(uid, "free_delivery_hint")
 
     kb.row(
         InlineKeyboardButton(await t(uid,"clear"), callback_data="clear"),
@@ -4504,284 +3973,6 @@ async def noop(call):
     await call.answer()
 # ========== ДОСТАВКА: ФОРМА ==========
 
-async def start_delivery_form(target, uid, from_pay: bool = False):
-    """Запускает форму с шага 1 — запрос имени."""
-    await DeliveryForm.name.set()
-    sent = await bot.send_message(uid, await t(uid, "delivery_step_name"), reply_markup=ReplyKeyboardRemove())
-    # Сохраняем message_id чтобы удалить после ответа пользователя, и контекст запуска
-    await dp.storage.update_data(chat=uid, user=uid, data={"last_bot_msg": sent.message_id, "from_pay": from_pay})
-
-
-async def show_delivery_confirm(target, uid, data: dict, from_pay: bool = False, gift_flow: bool = False):
-    """Показывает блок данных доставки с кнопками Подтвердить / Заново.
-    Редактирует существующее сообщение target вместо отправки новых."""
-    text = await format_delivery_block(uid, data)
-
-    kb = InlineKeyboardMarkup()
-    if gift_flow:
-        confirm_cb = "delivery_confirmed_gift"
-        refill_cb  = "delivery_refill_gift"
-    elif from_pay:
-        confirm_cb = "delivery_confirmed_pay"
-        refill_cb  = "delivery_refill_pay"
-    else:
-        confirm_cb = "delivery_confirmed_save"
-        refill_cb  = "delivery_refill_save"
-
-    kb.add(
-        InlineKeyboardButton(await t(uid, "delivery_confirm_btn"), callback_data=confirm_cb),
-        InlineKeyboardButton(await t(uid, "delivery_refill_btn"),  callback_data=refill_cb),
-    )
-
-    # Редактируем существующее сообщение (если target — callback) или отправляем новое
-    try:
-        if isinstance(target, types.CallbackQuery):
-            await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        else:
-            await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
-    except Exception:
-        # Если edit_text не сработал (сообщение удалено или не изменилось) — шлём новое
-        await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.message_handler(state=DeliveryForm.name)
-async def delivery_got_name(message: types.Message, state: FSMContext):
-    uid = message.from_user.id
-    name = message.text.strip()
-
-    # Удаляем вопрос бота (сообщение с запросом имени) и ответ пользователя
-    data = await state.get_data()
-    try:
-        await bot.delete_message(uid, data.get("last_bot_msg"))
-    except Exception:
-        pass
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-    await state.update_data(name=name)
-    await DeliveryForm.phone.set()
-
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(types.KeyboardButton(await t(uid, "delivery_step_phone_btn"), request_contact=True))
-    sent = await bot.send_message(uid, await t(uid, "delivery_step_phone"), reply_markup=kb)
-    await state.update_data(last_bot_msg=sent.message_id)
-
-
-@dp.message_handler(state=DeliveryForm.phone, content_types=[types.ContentType.CONTACT])
-async def delivery_got_phone_contact(message: types.Message, state: FSMContext):
-    uid = message.from_user.id
-    phone = message.contact.phone_number
-    await state.update_data(phone=phone)
-    await DeliveryForm.address.set()
-
-    data = await state.get_data()
-    try:
-        await bot.delete_message(uid, data.get("last_bot_msg"))
-        await message.delete()
-    except Exception:
-        pass
-
-    sent = await bot.send_message(
-        uid, await t(uid, "delivery_step_address"),
-        reply_markup=ReplyKeyboardRemove(), parse_mode="HTML"
-    )
-    await state.update_data(last_bot_msg=sent.message_id)
-
-
-@dp.message_handler(state=DeliveryForm.phone, content_types=[types.ContentType.TEXT])
-async def delivery_got_phone_text(message: types.Message, state: FSMContext):
-    uid = message.from_user.id
-    phone = message.text.strip()
-    await state.update_data(phone=phone)
-    await DeliveryForm.address.set()
-
-    data = await state.get_data()
-    try:
-        await bot.delete_message(uid, data.get("last_bot_msg"))
-        await message.delete()
-    except Exception:
-        pass
-
-    sent = await bot.send_message(
-        uid, await t(uid, "delivery_step_address"),
-        reply_markup=ReplyKeyboardRemove(), parse_mode="HTML"
-    )
-    await state.update_data(last_bot_msg=sent.message_id)
-
-
-@dp.message_handler(state=DeliveryForm.address)
-async def delivery_got_address(message: types.Message, state: FSMContext):
-    uid = message.from_user.id
-    raw = message.text.strip().replace(". ", "|").replace(".", "|")
-    await state.update_data(address=raw)
-    await DeliveryForm.tracking.set()
-
-    data = await state.get_data()
-    try:
-        await bot.delete_message(uid, data.get("last_bot_msg"))
-        await message.delete()
-    except Exception:
-        pass
-
-    kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton(await t(uid, "delivery_tracking_yes_btn"), callback_data="dtracking_yes"),
-        InlineKeyboardButton(await t(uid, "delivery_tracking_no_btn"), callback_data="dtracking_no"),
-    )
-    sent = await bot.send_message(uid, await t(uid, "delivery_step_tracking"), reply_markup=kb)
-    await state.update_data(last_bot_msg=sent.message_id)
-
-
-@dp.callback_query_handler(lambda c: c.data in ("dtracking_yes", "dtracking_no"),
-                            state=DeliveryForm.tracking)
-async def delivery_got_tracking(call: types.CallbackQuery, state: FSMContext):
-    uid = call.from_user.id
-    tracking = (call.data == "dtracking_yes")
-    await state.update_data(tracking=tracking)
-
-    data = await state.get_data()
-    await state.finish()
-
-    delivery_data = {
-        "name":     data["name"],
-        "phone":    data["phone"],
-        "address":  data["address"],
-        "tracking": tracking,
-    }
-
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE users SET
-                delivery_name=$1, delivery_phone=$2,
-                delivery_address=$3, delivery_tracking=$4
-            WHERE user_id=$5
-        """, delivery_data["name"], delivery_data["phone"],
-             delivery_data["address"], delivery_data["tracking"], uid)
-
-    # Удаляем шаг с выбором трека
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-
-    from_pay  = data.get("from_pay", False)
-    gift_flow = data.get("gift_flow", False)
-
-    # Если форма заполнялась не из потока оплаты — восстанавливаем главную клавиатуру.
-    # При from_pay форма была запущена поверх inline-сообщения и клавиатура уже на месте.
-    if not from_pay and not gift_flow:
-        lang = await get_lang(uid)
-        mk = main_menu(lang)
-        await bot.send_message(uid, "✅", reply_markup=mk)
-
-    await show_delivery_confirm(call, uid, delivery_data, from_pay=from_pay, gift_flow=gift_flow)
-
-
-@dp.callback_query_handler(lambda c: c.data in ("delivery_refill", "delivery_refill_pay", "delivery_refill_save"))
-async def delivery_refill(call):
-    uid = call.from_user.id
-    from_pay = (call.data == "delivery_refill_pay")
-    await call.answer()
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-    await start_delivery_form(call, uid, from_pay=from_pay)
-
-
-@dp.callback_query_handler(lambda c: c.data == "delivery_confirmed_pay")
-async def delivery_confirmed_pay(call):
-    uid = call.from_user.id
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET delivery_saved=true WHERE user_id=$1", uid
-        )
-
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(await t(uid, "pay_usdt_btn"), callback_data="pay_usdt_delivery"))
-    kb.add(InlineKeyboardButton(await t(uid, "pay_card_btn"), callback_data="pay_card_delivery"))
-    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
-
-    # Редактируем то же сообщение с адресом → экран выбора оплаты
-    try:
-        await call.message.edit_text(await t(uid, "pay"), reply_markup=kb)
-    except Exception:
-        await render(call, await t(uid, "pay"), kb)
-
-
-@dp.callback_query_handler(lambda c: c.data == "delivery_confirmed_save")
-async def delivery_confirmed_save(call):
-    uid = call.from_user.id
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET delivery_saved=true WHERE user_id=$1", uid
-        )
-
-    await call.answer("✅")
-    await render_profile(call)
-
-
-@dp.callback_query_handler(lambda c: c.data == "delivery_confirmed_gift")
-async def delivery_confirmed_gift(call):
-    """Адрес подтверждён из gift-потока — возвращаем в gift-магазин."""
-    uid = call.from_user.id
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET delivery_saved=true WHERE user_id=$1", uid
-        )
-
-    await call.answer("✅")
-    # Возвращаем в выбор режима доставки для подарка
-    await open_gift_shop(call)
-
-
-@dp.callback_query_handler(lambda c: c.data == "delivery_refill_gift")
-async def delivery_refill_gift(call):
-    """Перезаполнение адреса из gift-потока."""
-    uid = call.from_user.id
-    await call.answer()
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
-    await _gift_start_delivery_form(call, uid)
-
-# ========== ОПЛАТА ==========
-
-@dp.callback_query_handler(lambda c: c.data == "pay")
-async def pay(call):
-    uid = call.from_user.id
-
-    # Проверяем наличие перед переходом к оплате
-    problems = await check_cart_stock(uid)
-    if problems:
-        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
-        return
-
-    cart_mode = await get_cart_mode(uid)
-    is_delivery = (cart_mode == "delivery")
-
-    if is_delivery:
-        delivery_data = await get_delivery_data(uid)
-        if not delivery_data:
-            await start_delivery_form(call, uid, from_pay=True)
-            return
-        else:
-            await show_delivery_confirm(call, uid, delivery_data, from_pay=True)
-            return
-
-    # Самовывоз — наличные + USDT + карта
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"))
-    kb.add(InlineKeyboardButton(await t(uid, "pay_usdt_btn"), callback_data="pay_usdt_delivery"))
-    kb.add(InlineKeyboardButton(await t(uid, "pay_card_btn"), callback_data="pay_card_delivery"))
-    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
-    await render(call, await t(uid, "pay"), kb)
 
 @dp.callback_query_handler(lambda c: c.data == "cash")
 async def cash(call):
@@ -4794,35 +3985,6 @@ async def cash(call):
     )
 
     await render(call, await t(uid,"confirm_order"), kb)
-
-async def _build_delivery_admin_block(uid: int) -> str:
-    """Блок данных доставки для сообщения админам (по-русски, без локализации)."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT delivery_name, delivery_phone, delivery_address, delivery_tracking
-            FROM users WHERE user_id=$1
-        """, uid)
-
-    if not row or not row["delivery_name"]:
-        return ""
-
-    addr_parts = (row["delivery_address"] or "").split("|")
-    bundesland = addr_parts[0] if len(addr_parts) > 0 else ""
-    stadt      = addr_parts[1] if len(addr_parts) > 1 else ""
-    strasse    = addr_parts[2] if len(addr_parts) > 2 else ""
-    tracking   = "✅ Да" if row["delivery_tracking"] else "❌ Нет"
-
-    return (
-        f"\n\n📦 ДОСТАВКА:\n"
-        f"Имя: {row['delivery_name']}\n"
-        f"Телефон: {row['delivery_phone']}\n"
-        f"Bundesland: {bundesland}\n"
-        f"Stadt: {stadt}\n"
-        f"Straße: {strasse}\n"
-        f"Трек-номер: {tracking}"
-    )
-
-
 
 
 
@@ -5027,8 +4189,7 @@ async def confirm_cash(call):
 
     payment_line = f"Оплата: Наличные\nИТОГО: {total}€"
     await _send_order_to_admins(
-        order_id, uid, username, text_admin, payment_line,
-        is_delivery=False, city_key=resolved_city
+        order_id, uid, username, text_admin, payment_line, city_key=resolved_city
     )
 
 # ========== НОВЫЕ СПОСОБЫ ОПЛАТЫ (DELIVERY) ==========
@@ -5068,9 +4229,6 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
     Создаёт заказ со статусом pending, атомарно резервирует stock и очищает корзину.
     Возвращает (order_id, resolved_city_key) или None если stock закончился (race condition).
     """
-    cart_mode = await get_cart_mode(uid)
-    is_delivery = (cart_mode == "delivery")
-
     try:
         async with pool.acquire() as conn:
             user_city = await conn.fetchval("SELECT city FROM users WHERE user_id=$1", uid)
@@ -5079,9 +4237,9 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
             async with conn.transaction():
                 order_id = await conn.fetchval("""
                     INSERT INTO orders (user_id, items, total, payment, discount, status, is_delivery, city_key)
-                    VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
+                    VALUES ($1, $2, $3, $4, $5, 'pending', false, $6)
                     RETURNING id
-                """, uid, items_str, eur_total, payment, discount, is_delivery, resolved_city)
+                """, uid, items_str, eur_total, payment, discount, resolved_city)
                 ok = await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
                 if not ok:
                     return None   # stock закончился — caller покажет retry
@@ -5097,25 +4255,21 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
 
 async def _send_order_to_admins(order_id: int, uid: int, username: str,
                                  text_admin: str, payment_line: str,
-                                 is_delivery: bool = True,
                                  city_key: str | None = None) -> None:
     """
     Отправляет заказ городским админам (и только им).
     Высшие админы получают уведомление только ПОСЛЕ подтверждения городским.
     city_key: ключ из CITIES или None (→ fallback на buerhausen).
     """
-    order_type = "🚚 Доставка" if is_delivery else "🏪 Самовывоз"
-    delivery_block = await _build_delivery_admin_block(uid) if is_delivery else ""
     resolved_city = get_order_city(city_key)
     city_name = CITIES[resolved_city]["name"]
 
     order_text = (
-        f"{order_type} | 🏙 {city_name}\n"
+        f"🏪 Самовывоз | 🏙 {city_name}\n"
         f"{text_admin}\n"
         f"ID: {order_id}\n"
         f"User: @{username}\n"
         f"{payment_line}"
-        f"{delivery_block}"
     )
     kb = InlineKeyboardMarkup()
     kb.add(
@@ -5190,9 +4344,6 @@ async def paid_usdt(call):
     parts = call.data.split("_")
     eur_str, usdt_str, rate_str = parts[2], parts[3], parts[4]
 
-    cart_mode = await get_cart_mode(uid)
-    is_delivery = (cart_mode == "delivery")
-
     problems = await check_cart_stock(uid)
     if problems:
         await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
@@ -5216,7 +4367,7 @@ async def paid_usdt(call):
         f"К оплате: {usdt_str} USDT\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -5266,9 +4417,6 @@ async def paid_card_eur(call):
     username = call.from_user.username or str(uid)
     eur_str = call.data.split("paid_card_eur_")[1]
 
-    cart_mode = await get_cart_mode(uid)
-    is_delivery = (cart_mode == "delivery")
-
     problems = await check_cart_stock(uid)
     if problems:
         await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
@@ -5289,7 +4437,7 @@ async def paid_card_eur(call):
         f"Оплата: Банковская карта EUR (ожидает проверки)\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -5334,9 +4482,6 @@ async def paid_card_uah(call):
     parts = call.data.split("_")
     eur_str, uah_str, rate_str = parts[3], parts[4], parts[5]
 
-    cart_mode = await get_cart_mode(uid)
-    is_delivery = (cart_mode == "delivery")
-
     problems = await check_cart_stock(uid)
     if problems:
         await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
@@ -5360,7 +4505,7 @@ async def paid_card_uah(call):
         f"К оплате: {uah_str} UAH\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, is_delivery=is_delivery, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -6928,7 +6073,7 @@ async def citymanage_remove_confirm(call, state: FSMContext):
 
     async with pool.acquire() as conn:
         # Обнуляем город у пользователей
-        await conn.execute("UPDATE users SET city=NULL, delivery_mode=0 WHERE city=$1", city_key)
+        await conn.execute("UPDATE users SET city=NULL WHERE city=$1", city_key)
         # Удаляем city_stock
         await conn.execute("DELETE FROM city_stock WHERE city_key=$1", city_key)
         # Удаляем город
