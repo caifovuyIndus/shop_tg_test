@@ -203,6 +203,10 @@ async def get_bot_username() -> str:
         _bot_username = me.username
     return _bot_username
 
+# Кэш курсов валют: {uid: {currency: (rate, timestamp)}}
+_rate_cache: dict = {}
+_RATE_TTL = 1800  # 30 минут
+
 # ========== БАЗА ДАННЫХ ==========
 
 pool = None
