@@ -9,6 +9,7 @@ from datetime import date, timedelta, datetime
 from urllib.parse import quote
 
 from aiogram import Bot, Dispatcher, types
+from aiogram.dispatcher.middlewares import BaseMiddleware
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -109,7 +110,7 @@ _throttle_map: dict[int, float] = {}      # uid → timestamp последнег
 _throttle_warn:  dict[int, int]  = {}     # uid → сколько раз уже предупреждён
 
 
-class ThrottlingMiddleware:
+class ThrottlingMiddleware(BaseMiddleware):
     """aiogram 2.x process_update middleware — не требует декораторов на хендлерах."""
 
     async def on_pre_process_update(self, update: types.Update, data: dict):
