@@ -3973,7 +3973,24 @@ async def cart_minus(call):
 @dp.callback_query_handler(lambda c: c.data == "noop")
 async def noop(call):
     await call.answer()
-# ========== ДОСТАВКА: ФОРМА ==========
+
+# ========== ОПЛАТА ==========
+
+@dp.callback_query_handler(lambda c: c.data == "pay")
+async def pay(call):
+    uid = call.from_user.id
+
+    problems = await check_cart_stock(uid)
+    if problems:
+        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"))
+    kb.add(InlineKeyboardButton(await t(uid, "pay_usdt_btn"), callback_data="pay_usdt_delivery"))
+    kb.add(InlineKeyboardButton(await t(uid, "pay_card_btn"), callback_data="pay_card_delivery"))
+    kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
+    await render(call, await t(uid, "pay"), kb)
 
 
 @dp.callback_query_handler(lambda c: c.data == "cash")
