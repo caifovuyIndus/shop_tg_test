@@ -3802,6 +3802,8 @@ async def add(call):
                 )
             return
 
+        new_mode = await get_cart_mode(uid)
+
         if exists:
             await conn.execute("""
                 UPDATE cart
@@ -3821,7 +3823,7 @@ async def add(call):
             """, uid, pid, max_pos + 1)
 
             # Фиксируем режим корзины при добавлении первого товара
-            if cart_count == 0:
+            if max_pos == 0:
                 await conn.execute(
                     "UPDATE users SET cart_mode=$1 WHERE user_id=$2", new_mode, uid
                 )
