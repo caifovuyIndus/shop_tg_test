@@ -90,10 +90,62 @@ def get_stock_pool(city_key: str | None) -> str:
     return CITIES.get(resolved, {}).get("stock_pool", "default")
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# ========== КОНСТАНТЫ ==========
+BASE_PRICE: int = 15   # Базовая цена товара в EUR. Менять только здесь.
 
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
+
+# ========== THROTTLING MIDDLEWARE ==========
+# Ограничивает частоту запросов: 1 action / THROTTLE_RATE секунд на пользователя.
+# Защищает pool от перегрузки при спаме кнопками.
+
+THROTTLE_RATE = 0.7          # секунды между разрешёнными запросами
+THROTTLE_WARN_AFTER = 3      # сколько раз предупредить пользователя, прежде чем молча игнорировать
+
+_throttle_map: dict[int, float] = {}      # uid → timestamp последнего action
+_throttle_warn:  dict[int, int]  = {}     # uid → сколько раз уже предупреждён
+
+
+class ThrottlingMiddleware:
+    """aiogram 2.x process_update middleware — не требует декораторов на хендлерах."""
+
+    async def on_pre_process_update(self, update: types.Update, data: dict):
+        # Определяем uid из любого типа апдейта
+        if update.message:
+            uid = update.message.from_user.id
+        elif update.callback_query:
+            uid = update.callback_query.from_user.id
+        else:
+            return
+
+        now = asyncio.get_event_loop().time()
+        last = _throttle_map.get(uid, 0.0)
+        diff = now - last
+
+        if diff < THROTTLE_RATE:
+            warns = _throttle_warn.get(uid, 0)
+            if warns < THROTTLE_WARN_AFTER:
+                _throttle_warn[uid] = warns + 1
+                try:
+                    if update.callback_query:
+                        await update.callback_query.answer("⏳", show_alert=False)
+                    elif update.message:
+                        await update.message.answer("⏳")
+                except Exception:
+                    pass
+            # Пропускаем апдейт — не передаём дальше по цепочке
+            raise CancelHandler()
+
+        _throttle_map[uid] = now
+        _throttle_warn.pop(uid, None)   # сброс счётчика предупреждений
+
+
+from aiogram.dispatcher.handler import CancelHandler
+
+dp.middleware.setup(ThrottlingMiddleware())
 
 _bot_username = None
 
@@ -1572,10 +1624,26 @@ async def _run_roulette_animation(call, winning_prize: dict, spinning_label: str
         pass
     await asyncio.sleep(0.7)
 
+async def _calc_streak_from_row(streak_weeks, last_order_date, city_key) -> int:
+    """
+    Вычисляет актуальный стрик из уже загруженных данных строки users.
+    Не делает дополнительных DB-запросов — используется внутри get_user_discounts.
+    """
+    if not last_order_date:
+        return 0
+    is_frozen, freeze_rows, now_dt = await _get_freeze_data(city_key)
+    days_since = await _effective_days_since(last_order_date, city_key, _rows=freeze_rows, _now_dt=now_dt)
+    if days_since <= 7:
+        return streak_weeks or 0
+    return 0
+
+
 async def get_user_discounts(uid):
+    # Один SELECT вместо двух (раньше отдельно шёл get_effective_streak → _streak_snapshot)
     async with pool.acquire() as conn:
         user = await conn.fetchrow("""
-            SELECT total_items, referrals, current_discount, ref_bonus, promo_discount
+            SELECT total_items, referrals, current_discount, ref_bonus, promo_discount,
+                   streak_weeks, last_order_date, max_streak_weeks, city
             FROM users WHERE user_id=$1
         """, uid)
 
@@ -1583,11 +1651,17 @@ async def get_user_discounts(uid):
         return []
 
     items = user["total_items"]
-    streak = await get_effective_streak(uid)
     refs = user["referrals"]
     wheel_discount = user["current_discount"]
     ref_bonus = user["ref_bonus"] or 0
     promo_discount = user["promo_discount"] or 0
+
+    # Считаем стрик без дополнительного DB-запроса
+    streak = await _calc_streak_from_row(
+        streak_weeks=user["streak_weeks"],
+        last_order_date=user["last_order_date"],
+        city_key=user["city"],
+    )
 
     discounts = []
 
@@ -1664,7 +1738,7 @@ async def calculate_total_discount(uid, quantity):
     return round(total_discount, 2)
 
 async def calculate_final_price(uid, quantity):
-    base_total = 15 * quantity
+    base_total = BASE_PRICE * quantity
     discount = await calculate_total_discount(uid, quantity)
 
     final = base_total - discount
@@ -1686,7 +1760,8 @@ def fmt_amount(value) -> str:
 
 
 async def get_user_delivery_mode(uid) -> bool:
-    """Текущий режим пользователя: True = доставка, False = самовывоз."""
+    """Текущий режим пользователя: True = доставка, False = самовывоз.
+    Если нужны и lang, и city, и delivery_mode — используй get_user_ctx() вместо этой."""
     async with pool.acquire() as conn:
         return bool(await conn.fetchval(
             "SELECT delivery_mode FROM users WHERE user_id=$1", uid
@@ -1956,11 +2031,31 @@ async def get_effective_streak(uid) -> int:
     weeks, _, _, _ = await _streak_snapshot(uid)
     return weeks
 
-async def get_lang(uid):
+async def get_user_ctx(uid: int) -> dict:
+    """
+    Один SELECT вместо get_lang() + get_user_city() + get_user_delivery_mode().
+    Возвращает dict с ключами: lang, city, delivery_mode, banned.
+    Используй везде где нужно 2+ из этих полей в одном хендлере.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT language, city, delivery_mode, banned FROM users WHERE user_id=$1", uid
+        )
+    if not row:
+        return {"lang": "ru", "city": None, "delivery_mode": False, "banned": False}
+    return {
+        "lang":          row["language"] or "ru",
+        "city":          row["city"],
+        "delivery_mode": bool(row["delivery_mode"]),
+        "banned":        bool(row["banned"]),
+    }
+
+
+async def get_lang(uid: int) -> str:
+    """Возвращает язык пользователя. Используй get_user_ctx() если нужно несколько полей."""
     async with pool.acquire() as conn:
         lang = await conn.fetchval(
-            "SELECT language FROM users WHERE user_id=$1",
-            uid
+            "SELECT language FROM users WHERE user_id=$1", uid
         )
     return lang or "ru"
 
@@ -1972,16 +2067,16 @@ async def check_not_banned(target) -> bool:
     прервать выполнение (return).
     """
     uid = target.from_user.id
-
     async with pool.acquire() as conn:
-        banned = await conn.fetchval(
-            "SELECT banned FROM users WHERE user_id=$1", uid
+        row = await conn.fetchrow(
+            "SELECT banned, language FROM users WHERE user_id=$1", uid
         )
 
-    if not banned:
+    if not row or not row["banned"]:
         return True
 
-    text = await t(uid, "banned_message")
+    lang = row["language"] or "ru"
+    text = TEXTS[lang].get("banned_message", "🚫")
 
     if isinstance(target, types.CallbackQuery):
         await target.answer(text, show_alert=True)
@@ -2013,25 +2108,17 @@ def is_text(message, key):
 async def get_user_city(uid: int) -> str | None:
     """Возвращает city из таблицы users (None если не выбран)."""
     async with pool.acquire() as conn:
-        return await conn.fetchval(
-            "SELECT city FROM users WHERE user_id=$1", uid
-        )
+        return await conn.fetchval("SELECT city FROM users WHERE user_id=$1", uid)
 
 
 async def set_user_city(uid: int, city: str | None) -> None:
-    """Сохраняет город пользователя. city='delivery' → режим доставки."""
+    """Сохраняет город пользователя. city='delivery' → delivery_mode=true."""
+    delivery = city == "delivery"
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE users SET city=$1 WHERE user_id=$1", city, uid
+            "UPDATE users SET city=$1, delivery_mode=$2 WHERE user_id=$3",
+            city, delivery, uid
         )
-        if city == "delivery":
-            await conn.execute(
-                "UPDATE users SET delivery_mode=1 WHERE user_id=$1", uid
-            )
-        else:
-            await conn.execute(
-                "UPDATE users SET delivery_mode=0 WHERE user_id=$1", uid
-            )
 
 
 async def show_city_selection(target, uid: int, *, back_cb: str | None = None) -> None:
@@ -2145,60 +2232,63 @@ def get_rank(total_items):
 
     return current
 
+# Кеш file_id: url/path → telegram file_id.
+# После первой отправки фото Telegram выдаёт file_id — последующие отправки
+# идут по file_id (~3x быстрее, не нагружает Telegram API).
+_photo_file_id_cache: dict[str, str] = {}
+
+
+async def _send_photo_cached(send_fn, photo: str, **kwargs) -> types.Message:
+    """
+    Отправляет фото с кешированием file_id.
+    send_fn — coroutine function (message.answer_photo, bot.send_photo, etc.)
+    photo — URL или путь к файлу.
+    """
+    cached = _photo_file_id_cache.get(photo)
+    sent = await send_fn(cached or photo, **kwargs)
+    # Сохраняем file_id при первой отправке
+    if not cached and sent and sent.photo:
+        file_id = sent.photo[-1].file_id
+        _photo_file_id_cache[photo] = file_id
+    return sent
+
+
 async def render(target, text, kb=None, photo=None, parse_mode="HTML"):
     try:
         if isinstance(target, types.Message):
             if photo:
-                await target.answer_photo(
-                    photo,
-                    caption=text,
-                    reply_markup=kb,
-                    parse_mode=parse_mode
+                await _send_photo_cached(
+                    target.answer_photo, photo,
+                    caption=text, reply_markup=kb, parse_mode=parse_mode
                 )
             else:
-                await target.answer(
-                    text,
-                    reply_markup=kb,
-                    parse_mode=parse_mode
-                )
+                await target.answer(text, reply_markup=kb, parse_mode=parse_mode)
             return
 
         msg = target.message
 
         if photo:
             await msg.delete()
-            await msg.answer_photo(
-                photo,
-                caption=text,
-                reply_markup=kb,
-                parse_mode=parse_mode
+            await _send_photo_cached(
+                msg.answer_photo, photo,
+                caption=text, reply_markup=kb, parse_mode=parse_mode
             )
         else:
-            await msg.edit_text(
-                text,
-                reply_markup=kb,
-                parse_mode=parse_mode
-            )
+            await msg.edit_text(text, reply_markup=kb, parse_mode=parse_mode)
 
     except Exception:
         try:
             await target.message.delete()
-        except:
+        except Exception:
             pass
 
         if photo:
-            await target.message.answer_photo(
-                photo,
-                caption=text,
-                reply_markup=kb,
-                parse_mode=parse_mode
+            await _send_photo_cached(
+                target.message.answer_photo, photo,
+                caption=text, reply_markup=kb, parse_mode=parse_mode
             )
         else:
-            await target.message.answer(
-                text,
-                reply_markup=kb,
-                parse_mode=parse_mode
-            )
+            await target.message.answer(text, reply_markup=kb, parse_mode=parse_mode)
 
 async def notify_no_username(call_or_message, uid: int) -> None:
     """
@@ -3466,7 +3556,7 @@ async def gift_apply(call):
             elif "bonus_used" in str(e):
                 await call.answer(await t(uid, "gift_already_used"), show_alert=True)
             else:
-                logging.error("gift_apply error uid=%s pid=%s: %s", uid, pid, e)
+                logger.error("gift_apply error uid=%s pid=%s: %s", uid, pid, e)
                 await alert_super_admins(f"gift_apply: ошибка uid={uid} pid={pid}: {e}")
             return
 
@@ -3576,7 +3666,7 @@ async def gift_delivery_apply(call):
             elif "bonus_used" in str(e):
                 await call.answer(await t(uid, "gift_already_used"), show_alert=True)
             else:
-                logging.error("gift_delivery_apply error uid=%s pid=%s: %s", uid, pid, e)
+                logger.error("gift_delivery_apply error uid=%s pid=%s: %s", uid, pid, e)
                 await alert_super_admins(f"gift_delivery_apply: ошибка uid={uid} pid={pid}: {e}")
             return
 
@@ -3965,58 +4055,27 @@ async def render_category_selection(target, uid, mode="shop"):
 
 
 async def render_category_shop(target, uid, category):
+    # Один SELECT для lang + city + delivery_mode (вместо 3 отдельных roundtrip)
+    ctx = await get_user_ctx(uid)
+    lang = ctx["lang"]
+    delivery = ctx["delivery_mode"]
+    pool_key = get_stock_pool(ctx["city"])
+
+    # Один SELECT для products + user_discounts + promo (батч)
     async with pool.acquire() as conn:
         products = await conn.fetch(
             "SELECT * FROM products WHERE category=$1 ORDER BY id", category
         )
+        pids = [p["id"] for p in products]
 
-    total_qty = 1
-
-    final_price, discount = await calculate_final_price(uid, total_qty)
-    base_price = 15
-
-    delivery = await get_user_delivery_mode(uid)
-    section_key = "section_elfliq" if category == "elfliq" else "section_elfworld"
-
-    mode_label = await t(uid, "delivery_mode_on" if delivery else "delivery_mode_off")
-    text = f"{await t(uid, section_key)} | {mode_label}\n\n"
-    text += await t(uid, "choose_product") + "\n\n"
-
-    if discount > 0:
-        # Строка о промокоде — выше строки скидки, только если есть promo_discount
-        async with pool.acquire() as conn:
-            promo_discount = await conn.fetchval(
-                "SELECT promo_discount FROM users WHERE user_id=$1", uid
-            ) or 0
-        if promo_discount > 0:
-            text += (await t(uid, "promo_in_shop_label")).format(value=promo_discount) + "\n"
-        text += f"💰 {base_price}€ → {final_price}€ (-{discount}€)\n\n"
-    else:
-        text += f"💰 {base_price}€\n\n"
-
-    if delivery == True:
-        text += await t(uid, "free_delivery_hint") + "\n\n"
-
-    kb = InlineKeyboardMarkup()
-
-    lang = await get_lang(uid)
-
-    if not products:
-        text += await t(uid, "section_empty") + "\n"
-
-    user_city = await get_user_city(uid)
-    pool_key = get_stock_pool(user_city)
-    pids = [p["id"] for p in products]
-
-    async with pool.acquire() as conn:
-        # Батч: избранное
+        # Избранное
         fav_rows = await conn.fetch(
             "SELECT product_id FROM favorites WHERE user_id=$1 AND product_id = ANY($2::int[])",
             uid, pids
         )
         fav_set = {r["product_id"] for r in fav_rows}
 
-        # Батч: stock
+        # Stock (городской пул)
         if pool_key == "default":
             stock_rows = await conn.fetch(
                 "SELECT id, stock FROM products WHERE id = ANY($1::int[])", pids
@@ -4028,6 +4087,34 @@ async def render_category_shop(target, uid, category):
                 pool_key, pids
             )
             stock_map = {r["product_id"]: r["stock"] for r in stock_rows}
+
+        # Promo discount (нужен для показа строки скидки)
+        promo_discount = await conn.fetchval(
+            "SELECT promo_discount FROM users WHERE user_id=$1", uid
+        ) or 0
+
+    total_qty = 1
+    final_price, discount = await calculate_final_price(uid, total_qty)
+
+    section_key = "section_elfliq" if category == "elfliq" else "section_elfworld"
+    mode_label = TEXTS[lang]["delivery_mode_on" if delivery else "delivery_mode_off"]
+    text = f"{TEXTS[lang][section_key]} | {mode_label}\n\n"
+    text += TEXTS[lang]["choose_product"] + "\n\n"
+
+    if discount > 0:
+        if promo_discount > 0:
+            text += TEXTS[lang]["promo_in_shop_label"].format(value=promo_discount) + "\n"
+        text += f"💰 {BASE_PRICE}€ → {final_price}€ (-{discount}€)\n\n"
+    else:
+        text += f"💰 {BASE_PRICE}€\n\n"
+
+    if delivery:
+        text += TEXTS[lang]["free_delivery_hint"] + "\n\n"
+
+    kb = InlineKeyboardMarkup()
+
+    if not products:
+        text += TEXTS[lang]["section_empty"] + "\n"
 
     for p in products:
         pid = p["id"]
@@ -4042,14 +4129,14 @@ async def render_category_shop(target, uid, category):
     other_category = "elfworld" if category == "elfliq" else "elfliq"
     switch_key = "switch_to_elfworld" if category == "elfliq" else "switch_to_elfliq"
 
-    kb.add(InlineKeyboardButton(await t(uid, switch_key), callback_data=f"shop_cat_{other_category}"))
-
-    toggle_label = await t(uid, "delivery_mode_off" if delivery else "delivery_mode_on")
-    kb.add(InlineKeyboardButton(toggle_label, callback_data=f"toggle_delivery_mode_cat_{category}"))
-
+    kb.add(InlineKeyboardButton(TEXTS[lang][switch_key], callback_data=f"shop_cat_{other_category}"))
+    kb.add(InlineKeyboardButton(
+        TEXTS[lang]["delivery_mode_off" if delivery else "delivery_mode_on"],
+        callback_data=f"toggle_delivery_mode_cat_{category}"
+    ))
     kb.add(
-        InlineKeyboardButton(await t(uid,"cart"), callback_data="open_cart"),
-        InlineKeyboardButton(await t(uid,"profile"), callback_data="profile")
+        InlineKeyboardButton(TEXTS[lang]["cart"],    callback_data="open_cart"),
+        InlineKeyboardButton(TEXTS[lang]["profile"], callback_data="profile")
     )
 
     await render(target, text, kb)
@@ -4927,6 +5014,7 @@ async def confirm_cash(call):
             if "stock_unavailable" in str(e):
                 await call.answer(await t(uid, "stock_changed_retry"), show_alert=True)
                 return
+            logger.exception("confirm_cash: неожиданная ошибка uid=%s", uid)
             await alert_super_admins(f"confirm_cash: ошибка создания заказа uid={uid}: {e}")
             raise
 
@@ -4982,23 +5070,28 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
     cart_mode = await get_cart_mode(uid)
     is_delivery = (cart_mode == "delivery")
 
-    async with pool.acquire() as conn:
-        user_city = await conn.fetchval("SELECT city FROM users WHERE user_id=$1", uid)
-        resolved_city = get_order_city(user_city)
+    try:
+        async with pool.acquire() as conn:
+            user_city = await conn.fetchval("SELECT city FROM users WHERE user_id=$1", uid)
+            resolved_city = get_order_city(user_city)
 
-        async with conn.transaction():
-            order_id = await conn.fetchval("""
-                INSERT INTO orders (user_id, items, total, payment, discount, status, is_delivery, city_key)
-                VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
-                RETURNING id
-            """, uid, items_str, eur_total, payment, discount, is_delivery, resolved_city)
-            ok = await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
-            if not ok:
-                raise Exception("stock_unavailable")
+            async with conn.transaction():
+                order_id = await conn.fetchval("""
+                    INSERT INTO orders (user_id, items, total, payment, discount, status, is_delivery, city_key)
+                    VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
+                    RETURNING id
+                """, uid, items_str, eur_total, payment, discount, is_delivery, resolved_city)
+                ok = await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
+                if not ok:
+                    return None   # stock закончился — caller покажет retry
 
-        await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
-        await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
-    return order_id, resolved_city
+            await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
+            await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
+        return order_id, resolved_city
+    except Exception:
+        logger.exception("_create_pending_order: неожиданная ошибка uid=%s payment=%s", uid, payment)
+        await alert_super_admins(f"_create_pending_order: неожиданная ошибка uid={uid} payment={payment}")
+        return None
 
 
 async def _send_order_to_admins(order_id: int, uid: int, username: str,
@@ -5041,7 +5134,7 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
             msg_ids.append(f"{admin}:{sent.message_id}")
         except Exception as e:
             failed_admins.append(str(admin))
-            logging.error("Failed to notify admin %s for order %s: %s", admin, order_id, e)
+            logger.error("Failed to notify admin %s for order %s: %s", admin, order_id, e)
     if failed_admins:
         await alert_super_admins(
             f"Не удалось отправить заказ #{order_id} админам: {', '.join(failed_admins)}. "
@@ -5400,8 +5493,8 @@ async def admin_confirm(call):
                     await bot.send_message(
                         inviter_id, await t(inviter_id, "ref_credited_notify")
                     )
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("ref_credited_notify: не удалось уведомить inviter %s: %s", inviter_id, _e)
 
         #    одноразовые бонусы (скидка с рулетки, реферальная, новичка, промокод) ──
         await conn.execute("""
