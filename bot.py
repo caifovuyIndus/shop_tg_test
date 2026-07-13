@@ -2570,13 +2570,16 @@ async def repeat_order(call):
         await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
         await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
 
+        max_pos = 0
         for item in items_str.split(","):
             pid, qty = item.split(":")
             pid, qty = int(pid), int(qty)
+            max_pos += 1
             await conn.execute("""
-                INSERT INTO cart (user_id, product_id, quantity, cart_mode)
-                VALUES ($1, $2, $3, 'pickup')
-            """, uid, pid, qty)
+                INSERT INTO cart (user_id, product_id, quantity, position)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, product_id) DO UPDATE SET quantity = EXCLUDED.quantity, position = EXCLUDED.position
+            """, uid, pid, qty, max_pos)
 
     await render_cart(call, uid)
 
@@ -3314,6 +3317,40 @@ async def gift_apply(call):
     await render(call, await t(uid, "gift_done"))
     await notify_no_username(call, uid)
 
+
+
+async def _sync_admin_messages(
+    msg_ids_raw: str,
+    actor_id: int,
+    base_text: str,
+    status_self: str,
+    status_others: str,
+) -> None:
+    """
+    Редактирует сообщения у всех админов после подтверждения/отмены.
+    msg_ids_raw — строка вида "chat_id:msg_id,chat_id:msg_id,..."
+    Актор получает status_self, остальные — status_others. Кнопки убираются.
+    """
+    if not msg_ids_raw:
+        return
+    for entry in msg_ids_raw.split(","):
+        entry = entry.strip()
+        if ":" not in entry:
+            continue
+        try:
+            chat_id_str, msg_id_str = entry.split(":", 1)
+            chat_id = int(chat_id_str)
+            msg_id = int(msg_id_str)
+            suffix = status_self if chat_id == actor_id else status_others
+            new_text = base_text + suffix
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=new_text,
+                reply_markup=None,
+            )
+        except Exception:
+            pass
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_issued_"))
