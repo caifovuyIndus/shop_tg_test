@@ -572,6 +572,14 @@ async def init_db():
             ALTER TABLE users
             ADD COLUMN IF NOT EXISTS promo_type TEXT DEFAULT NULL
         """)
+
+        # Накопленная реферальная скидка пригласившего (в €).
+        # Увеличивается на 2€ при каждом подтверждении первого заказа приглашённого.
+        # Расходуется частично — остаток сохраняется и не сгорает.
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS ref_discount REAL DEFAULT 0
+        """)
         
         count = await conn.fetchval("SELECT COUNT(*) FROM products WHERE category='elfliq'")
 
@@ -994,6 +1002,8 @@ TEXTS = {
         "ref_share_button": "📤 Поделиться ссылкой",
         "ref_share_text": "Заходи в наш магазин жидкостей по моей ссылке и получи скидку на первый заказ! 🎁",
         "ref_credited_notify": "🎉 Твой друг сделал первый заказ! Тебе начислена реферальная скидка 2€.",
+        "wheel_discount_saved": "🎰 Скидка с колеса удачи не применилась к этому заказу — она сохранена и будет доступна при следующем заказе.",
+        "ref_discount_partial": "💸 Реферальная скидка применена частично: -{used}€. Остаток {left}€ сохранён на следующий заказ.",
         "stats_total_orders": "🧾 Всего заказов: {count}",
         "stats_first_order": "📅 Дата первого заказа: {date}",
         "stats_rank": "🏆 Текущий ранг: {rank}",
@@ -1205,6 +1215,8 @@ TEXTS = {
         "ref_share_button": "📤 Поділитися посиланням",
         "ref_share_text": "Заходь у наш магазин рідин за моїм посиланням і отримай знижку на перше замовлення! 🎁",
         "ref_credited_notify": "🎉 Твій друг зробив перше замовлення! Тобі нараховано реферальну знижку 2€.",
+        "wheel_discount_saved": "🎰 Знижка з колеса удачі не застосувалась до цього замовлення — вона збережена і буде доступна при наступному замовленні.",
+        "ref_discount_partial": "💸 Реферальна знижка застосована частково: -{used}€. Залишок {left}€ збережено на наступне замовлення.",
         "stats_total_orders": "🧾 Всього замовлень: {count}",
         "stats_first_order": "📅 Дата першого замовлення: {date}",
         "stats_rank": "🏆 Поточний ранг: {rank}",
@@ -1416,6 +1428,8 @@ TEXTS = {
         "ref_share_button": "📤 Link teilen",
         "ref_share_text": "Komm in unseren Liquid-Shop über meinen Link und erhalte Rabatt auf deine erste Bestellung! 🎁",
         "ref_credited_notify": "🎉 Dein Freund hat seine erste Bestellung aufgegeben! Du hast einen Empfehlungsrabatt von 2€ erhalten.",
+        "wheel_discount_saved": "🎰 Der Glücksrad-Rabatt wurde bei dieser Bestellung nicht angewendet — er bleibt gespeichert und steht bei der nächsten Bestellung zur Verfügung.",
+        "ref_discount_partial": "💸 Empfehlungsrabatt teilweise verwendet: -{used}€. Restguthaben {left}€ für die nächste Bestellung gespeichert.",
         "stats_total_orders": "🧾 Bestellungen insgesamt: {count}",
         "stats_first_order": "📅 Datum der ersten Bestellung: {date}",
         "stats_rank": "🏆 Aktueller Rang: {rank}",
@@ -1639,7 +1653,7 @@ async def get_user_discounts(uid):
     # Один SELECT вместо двух (раньше отдельно шёл get_effective_streak → _streak_snapshot)
     async with pool.acquire() as conn:
         user = await conn.fetchrow("""
-            SELECT total_items, referrals, current_discount, ref_bonus, promo_discount,
+            SELECT total_items, ref_discount, current_discount, ref_bonus, promo_discount,
                    streak_weeks, last_order_date, max_streak_weeks, city
             FROM users WHERE user_id=$1
         """, uid)
@@ -1648,7 +1662,7 @@ async def get_user_discounts(uid):
         return []
 
     items = user["total_items"]
-    refs = user["referrals"]
+    ref_discount = user["ref_discount"] or 0
     wheel_discount = user["current_discount"]
     ref_bonus = user["ref_bonus"] or 0
     promo_discount = user["promo_discount"] or 0
@@ -1686,21 +1700,21 @@ async def get_user_discounts(uid):
             "one_time": True
         })
 
-    # PROMO — скидка от промокода, суммируется с остальными, действует на весь заказ
+    # PROMO — фиксированная сумма на весь заказ (не умножается на quantity)
     if promo_discount > 0:
         discounts.append({
             "type": "promo",
             "value": promo_discount,
-            "apply_to": "all",
+            "apply_to": "order",
             "one_time": True
         })
 
-    # REF — скидка ПРИГЛАСИВШЕМУ (начисляется после первого заказа друга)
-    if refs > 0:
+    # REF — накопленная скидка пригласившему (пул в €)
+    if ref_discount > 0:
         discounts.append({
             "type": "ref",
-            "value": DISCOUNTS["ref"]["inviter"],
-            "apply_to": "one_item",
+            "value": ref_discount,
+            "apply_to": "order",
             "one_time": True
         })
 
@@ -1709,40 +1723,79 @@ async def get_user_discounts(uid):
         discounts.append({
             "type": "ref_bonus",
             "value": ref_bonus,
-            "apply_to": "one_item",
+            "apply_to": "order",
             "one_time": True
         })
 
     return discounts
 
 async def calculate_total_discount(uid, quantity):
-    discounts = await get_user_discounts(uid)
+    """Возвращает суммарную скидку (для отображения в корзине/чеке)."""
+    _, discount, _, _, _ = await calculate_final_price(uid, quantity)
+    return discount
 
-    discount_all = 0
-    discount_one = 0
-
-    for d in discounts:
-        if d["apply_to"] == "all":
-            discount_all += d["value"]
-        elif d["apply_to"] == "one_item":
-            discount_one += d["value"]
-
-    total_discount = discount_all * quantity
-
-    if quantity > 0:
-        total_discount += discount_one
-
-    return round(total_discount, 2)
 
 async def calculate_final_price(uid, quantity):
+    """
+    Трёхуровневый расчёт итоговой цены.
+
+    Возвращает: (final_price, total_discount, wheel_used, ref_used, ref_bonus_used)
+      - wheel_used      : bool — была ли применена скидка колеса
+      - ref_used        : float — сколько списано из ref_discount (пул пригласившего)
+      - ref_bonus_used  : float — сколько списано из ref_bonus (бонус новичка)
+    """
+    discounts = await get_user_discounts(uid)
     base_total = BASE_PRICE * quantity
-    discount = await calculate_total_discount(uid, quantity)
 
-    final = base_total - discount
-    if final < 0:
-        final = 0
+    by_type = {d["type"]: d["value"] for d in discounts}
 
-    return round(final, 2), discount
+    # ── Уровень 1: Ранг + Стрик + Промокод ──────────────────────────────────
+    # Ранг и стрик умножаются на количество банок; промокод — фиксированная сумма.
+    rank_disc   = by_type.get("rank", 0) * quantity
+    streak_disc = by_type.get("streak", 0) * quantity
+    promo_disc  = by_type.get("promo", 0)          # apply_to: "order"
+
+    after_l1 = base_total - rank_disc - streak_disc - promo_disc
+    after_l1 = max(after_l1, 0)
+
+    # ── Уровень 2: Рулетка (ALL OR NOTHING) ─────────────────────────────────
+    wheel_value = by_type.get("wheel", 0)
+    wheel_total = wheel_value * quantity
+    wheel_used  = False
+
+    if wheel_value > 0:
+        if wheel_total <= after_l1:
+            after_l2  = after_l1 - wheel_total
+            wheel_used = True
+        else:
+            after_l2 = after_l1  # колесо не применяется, сохраняется
+    else:
+        after_l2 = after_l1
+
+    # ── Уровень 3: Реферальная скидка (частичное расходование) ──────────────
+    # Сначала ref_bonus (бонус новичка), потом ref_discount (пул пригласившего)
+    ref_bonus_pool  = by_type.get("ref_bonus", 0)
+    ref_discount_pool = by_type.get("ref", 0)
+
+    ref_bonus_used = 0.0
+    ref_used       = 0.0
+
+    remaining = after_l2
+
+    if ref_bonus_pool > 0 and remaining > 0:
+        ref_bonus_used = min(ref_bonus_pool, remaining)
+        remaining -= ref_bonus_used
+
+    if ref_discount_pool > 0 and remaining > 0:
+        ref_used = min(ref_discount_pool, remaining)
+        remaining -= ref_used
+
+    after_l3 = max(remaining, 0)
+
+    final         = round(after_l3, 2)
+    total_discount = round(base_total - final, 2)
+
+    return final, total_discount, wheel_used, ref_used, ref_bonus_used
 
 
 def fmt_amount(value) -> str:
@@ -2725,7 +2778,12 @@ async def profile_discounts_screen(call):
     for key, label_key in rows:
         label = await t(uid, label_key)
         if key in by_type and by_type[key] > 0:
-            text += f"✅ {label}: -{by_type[key]}€\n"
+            value = by_type[key]
+            # ref и ref_bonus — пул в €, показываем как суммарный баланс
+            if key in ("ref", "ref_bonus"):
+                text += f"✅ {label}: -{round(value, 2)}€\n"
+            else:
+                text += f"✅ {label}: -{value}€\n"
         else:
             text += f"❌ {label}\n"
 
@@ -3682,7 +3740,7 @@ async def render_category_shop(target, uid, category):
         ) or 0
 
     total_qty = 1
-    final_price, discount = await calculate_final_price(uid, total_qty)
+    final_price, discount, _wh, _ru, _rb = await calculate_final_price(uid, total_qty)
 
     section_key = "section_elfliq" if category == "elfliq" else "section_elfworld"
     text = f"{TEXTS[lang][section_key]}\n\n"
@@ -3888,7 +3946,7 @@ async def render_cart(target, uid):
         return
 
     total_qty = sum(i["quantity"] for i in items)
-    final_total, discount = await calculate_final_price(uid, total_qty)
+    final_total, discount, _wh, _ru, _rb = await calculate_final_price(uid, total_qty)
 
     text = "🧺\n\n"
 
@@ -4212,7 +4270,7 @@ async def confirm_cash(call):
 
         items_str = ",".join([f"{r['product_id']}:{r['quantity']}" for r in cart_items])
         total_qty = sum(r["quantity"] for r in cart_items)
-        total, discount = await calculate_final_price(uid, total_qty)
+        total, discount, _wh, _ru, _rb = await calculate_final_price(uid, total_qty)
 
         text_admin = "ЗАКАЗ:\n"
         for r in cart_items:
@@ -4268,7 +4326,7 @@ async def _get_cart_totals(uid: int):
     if not cart_items:
         return None
     total_qty = sum(r["quantity"] for r in cart_items)
-    eur_total, discount = await calculate_final_price(uid, total_qty)
+    eur_total, discount, _wh, _ru, _rb = await calculate_final_price(uid, total_qty)
     pids = [r["product_id"] for r in cart_items]
     async with pool.acquire() as conn:
         products_rows = await conn.fetch(
@@ -4690,8 +4748,9 @@ async def admin_confirm(call):
                 await conn.execute(
                     "UPDATE referrals SET activated=1 WHERE new_user_id=$1", user_id
                 )
+                # Начисляем 2€ в накопленный пул ref_discount (не обнуляется!)
                 await conn.execute(
-                    "UPDATE users SET referrals = referrals + 1 WHERE user_id=$1",
+                    "UPDATE users SET referrals = referrals + 1, ref_discount = ref_discount + 2 WHERE user_id=$1",
                     inviter_id
                 )
 
@@ -4702,22 +4761,58 @@ async def admin_confirm(call):
                 except Exception as _e:
                     logger.warning("ref_credited_notify: не удалось уведомить inviter %s: %s", inviter_id, _e)
 
-        #    одноразовые бонусы (скидка с рулетки, реферальная, новичка, промокод) ──
+        #    Вычисляем, какие одноразовые скидки реально применились к этому заказу ──
+        total_items_in_order = sum(
+            int(qty) for _, qty in (item.split(":") for item in items.split(","))
+        )
+        _, _disc, wheel_used, ref_used, ref_bonus_used = await calculate_final_price(
+            user_id, total_items_in_order
+        )
+
+        #    Списываем одноразовые бонусы с учётом фактического использования ──
         await conn.execute("""
-            UPDATE users 
-            SET current_discount = 0,
-                referrals = 0,
-                ref_bonus = 0,
-                promo_discount = 0,
-                promo_code = NULL,
-                promo_type = NULL,
-                total_saved = total_saved + $1,
-                total_spent = total_spent + $2,
-                streak_weeks = $3,
-                last_order_date = $4,
-                max_streak_weeks = GREATEST(max_streak_weeks, $3)
-            WHERE user_id=$5
-        """, order_discount, order_total, new_streak, date.today(), user_id)
+            UPDATE users
+            SET current_discount  = CASE WHEN $1 THEN 0 ELSE current_discount END,
+                ref_bonus         = ref_bonus - $2,
+                ref_discount      = ref_discount - $3,
+                promo_discount    = 0,
+                promo_code        = NULL,
+                promo_type        = NULL,
+                total_saved       = total_saved + $4,
+                total_spent       = total_spent + $5,
+                streak_weeks      = $6,
+                last_order_date   = $7,
+                max_streak_weeks  = GREATEST(max_streak_weeks, $6)
+            WHERE user_id=$8
+        """, wheel_used, ref_bonus_used, ref_used,
+             order_discount, order_total, new_streak, date.today(), user_id)
+
+        #    Уведомляем пользователя, если колесо не применилось (сохранено) ──
+        if not wheel_used:
+            discounts_snapshot = await get_user_discounts(user_id)
+            wheel_saved = next((d["value"] for d in discounts_snapshot if d["type"] == "wheel"), 0)
+            if wheel_saved > 0:
+                try:
+                    await bot.send_message(
+                        user_id, await t(user_id, "wheel_discount_saved")
+                    )
+                except Exception as _e:
+                    logger.warning("wheel_discount_saved notify failed for %s: %s", user_id, _e)
+
+        #    Уведомляем, если реф-скидка использована частично ──
+        remaining_ref = (
+            (next((d["value"] for d in await get_user_discounts(user_id) if d["type"] == "ref"), 0))
+        )
+        if ref_used > 0 and remaining_ref > 0:
+            try:
+                await bot.send_message(
+                    user_id,
+                    (await t(user_id, "ref_discount_partial")).format(
+                        used=round(ref_used, 2), left=round(remaining_ref, 2)
+                    )
+                )
+            except Exception as _e:
+                logger.warning("ref_discount_partial notify failed for %s: %s", user_id, _e)
 
     await call.answer("Подтверждено")
 
