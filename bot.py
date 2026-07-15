@@ -25,7 +25,7 @@ bot = Bot(token=BOT_TOKEN)
 # При старте загружаются в CITIES; обновляются командами /addcity, /removecity, /editcity.
 # Чтобы добавить нового высшего админа — добавить ID в SUPER_ADMINS.
 
-SUPER_ADMINS: list[int] = [7805603791]   # высшие админы (видят все города)
+SUPER_ADMINS: list[int] = [7805603791, 8283121468]   # высшие админы (видят все города)
 
 # CITIES заполняется из БД при init_db() и обновляется командами управления городами.
 # Структура: {city_key: {"name": str, "stock_pool": str, "admins": [int, ...]}}
@@ -36,12 +36,12 @@ _CITIES_DEFAULTS: dict[str, dict] = {
     "buerhausen": {
         "name": "Buerhausen",
         "stock_pool": "default",
-        "admins": [8283121468],
+        "admins": [5317145892],
     },
     "munich": {
         "name": "Munich",
         "stock_pool": "munich",
-        "admins": [1518888796],
+        "admins": [5323274376],
     },
 }
 
@@ -993,7 +993,7 @@ TEXTS = {
         "ref_invited_count": "👥 Приглашено пользователей: {count}",
         "ref_share_button": "📤 Поделиться ссылкой",
         "ref_share_text": "Заходи в наш магазин жидкостей по моей ссылке и получи скидку на первый заказ! 🎁",
-        "ref_credited_notify": "🎉 Твой друг сделал первый заказ! Тебе начислена реферальная скидка.",
+        "ref_credited_notify": "🎉 Твой друг сделал первый заказ! Тебе начислена реферальная скидка 2€.",
         "stats_total_orders": "🧾 Всего заказов: {count}",
         "stats_first_order": "📅 Дата первого заказа: {date}",
         "stats_rank": "🏆 Текущий ранг: {rank}",
@@ -1035,9 +1035,9 @@ TEXTS = {
         "pay_pending_user": "⏳ Оплата отправлена на проверку.\n\nАдминистратор свяжется с вами после подтверждения.",
         "rate_unavailable": "⚠️ Не удалось получить курс. Попробуй ещё раз через минуту.",
         # --- Города ---
-        "choose_city": "🏙 Выбери город для самовывоза или выбери Доставку:",
+        "choose_city": "🏙 Выбери город:",
         "city_delivery_btn": "🚚 Доставка",
-        "city_not_set_reminder": "🏙 Ты ещё не выбрал город.\n\nПожалуйста, выбери город для самовывоза или выбери Доставку:",
+        "city_not_set_reminder": "🏙 Ты ещё не выбрал город.\n\nПожалуйста, выбери город:",
         "city_selected": "✅ Город выбран: {city}",
         "city_delivery_selected": "✅ Выбрана Доставка",
         "profile_city_row": "🏙 Город: {city}",
@@ -1204,7 +1204,7 @@ TEXTS = {
         "ref_invited_count": "👥 Запрошено користувачів: {count}",
         "ref_share_button": "📤 Поділитися посиланням",
         "ref_share_text": "Заходь у наш магазин рідин за моїм посиланням і отримай знижку на перше замовлення! 🎁",
-        "ref_credited_notify": "🎉 Твій друг зробив перше замовлення! Тобі нараховано реферальну знижку.",
+        "ref_credited_notify": "🎉 Твій друг зробив перше замовлення! Тобі нараховано реферальну знижку 2€.",
         "stats_total_orders": "🧾 Всього замовлень: {count}",
         "stats_first_order": "📅 Дата першого замовлення: {date}",
         "stats_rank": "🏆 Поточний ранг: {rank}",
@@ -1246,9 +1246,9 @@ TEXTS = {
         "pay_pending_user": "⏳ Оплата надіслана на перевірку.\n\nАдміністратор зв'яжеться з вами після підтвердження.",
         "rate_unavailable": "⚠️ Не вдалося отримати курс. Спробуй ще раз за хвилину.",
         # --- Міста ---
-        "choose_city": "🏙 Обери місто для самовивозу або обери Доставку:",
+        "choose_city": "🏙 Обери місто:",
         "city_delivery_btn": "🚚 Доставка",
-        "city_not_set_reminder": "🏙 Ти ще не обрав місто.\n\nБудь ласка, обери місто для самовивозу або Доставку:",
+        "city_not_set_reminder": "🏙 Ти ще не обрав місто.\n\nБудь ласка, обери місто:",
         "city_selected": "✅ Місто обрано: {city}",
         "city_delivery_selected": "✅ Обрано Доставку",
         "profile_city_row": "🏙 Місто: {city}",
@@ -1415,7 +1415,7 @@ TEXTS = {
         "ref_invited_count": "👥 Eingeladene Nutzer: {count}",
         "ref_share_button": "📤 Link teilen",
         "ref_share_text": "Komm in unseren Liquid-Shop über meinen Link und erhalte Rabatt auf deine erste Bestellung! 🎁",
-        "ref_credited_notify": "🎉 Dein Freund hat seine erste Bestellung aufgegeben! Du hast einen Empfehlungsrabatt erhalten.",
+        "ref_credited_notify": "🎉 Dein Freund hat seine erste Bestellung aufgegeben! Du hast einen Empfehlungsrabatt von 2€ erhalten.",
         "stats_total_orders": "🧾 Bestellungen insgesamt: {count}",
         "stats_first_order": "📅 Datum der ersten Bestellung: {date}",
         "stats_rank": "🏆 Aktueller Rang: {rank}",
@@ -1457,9 +1457,9 @@ TEXTS = {
         "pay_pending_user": "⏳ Zahlung zur Überprüfung gesendet.\n\nDer Admin meldet sich nach der Bestätigung.",
         "rate_unavailable": "⚠️ Kurs konnte nicht abgerufen werden. Versuche es in einer Minute erneut.",
         # --- Städte ---
-        "choose_city": "🏙 Wähle deine Stadt für die Abholung oder wähle Lieferung:",
+        "choose_city": "🏙 Wähle deine Stadt:",
         "city_delivery_btn": "🚚 Lieferung",
-        "city_not_set_reminder": "🏙 Du hast noch keine Stadt gewählt.\n\nBitte wähle deine Abholstadt oder Lieferung:",
+        "city_not_set_reminder": "🏙 Du hast noch keine Stadt gewählt.\n\nBitte wähle deine Stadt:",
         "city_selected": "✅ Stadt gewählt: {city}",
         "city_delivery_selected": "✅ Lieferung gewählt",
         "profile_city_row": "🏙 Stadt: {city}",
@@ -1524,8 +1524,8 @@ DISCOUNTS = {
     ],
 
     "ref": {
-        "inviter": 1.5,
-        "new_user": 1.0
+        "inviter": 2.0,
+        "new_user": 2.0
     }
 }
 
@@ -5534,7 +5534,7 @@ async def inventory_cmd(message: types.Message):
                 continue
             lines.append(f"  {cat_labels.get(cat_key, cat_key.upper())}:")
 
-            for r in items:
+            for pos, r in enumerate(items, start=1):
                 pid = r["id"]
                 if pool_key == "default":
                     stock = r["stock"] or 0
@@ -5550,7 +5550,7 @@ async def inventory_cmd(message: types.Message):
                 else:
                     status = f"✅ {stock} шт."
                 total_city += stock
-                lines.append(f"    {name}: {status}")
+                lines.append(f"    {pos}. {name}: {status}")
 
         lines.append(f"  Итого: {total_city} ед. | Нет: {oos_city} поз.")
         lines.append("")
