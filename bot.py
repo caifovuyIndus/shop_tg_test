@@ -2813,10 +2813,10 @@ async def profile_ref(call):
         invited_count = await conn.fetchval(
             "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1", uid
         )
-        ref_earned = await conn.fetchval(
-            "SELECT ref_earned FROM users WHERE user_id=$1", uid
+        ref_discount_balance = await conn.fetchval(
+            "SELECT ref_discount FROM users WHERE user_id=$1", uid
         )
-    ref_earned = ref_earned or 0
+    ref_discount_balance = ref_discount_balance or 0
 
     rules = (await t(uid, "ref_rules")).format(
         inviter=DISCOUNTS["ref"]["inviter"],
@@ -2829,7 +2829,7 @@ async def profile_ref(call):
         f"{ref_link}\n\n"
         f"{rules}\n\n"
         f"{(await t(uid,'ref_invited_count')).format(count=invited_count)}\n"
-        f"{(await t(uid,'ref_earned')).format(value=round(ref_earned, 2))}"
+        f"{(await t(uid,'ref_earned')).format(value=round(ref_discount_balance, 2))}"
     )
 
     share_text = await t(uid, "ref_share_text")
