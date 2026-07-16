@@ -360,6 +360,13 @@ async def init_db():
             ADD COLUMN IF NOT EXISTS admin_message_ids TEXT DEFAULT ''
         """)
 
+        # Отдельно храним message_id уведомления "заказ оформлен" у высших
+        # админов, чтобы удалять его при подтверждении/отмене заказа
+        await conn.execute("""
+            ALTER TABLE orders
+            ADD COLUMN IF NOT EXISTS super_message_ids TEXT DEFAULT ''
+        """)
+
         # Сумма скидки, применённой к конкретному заказу (нужна для подсчёта
         # "Всего сэкономлено" в момент подтверждения заказа админом)
         await conn.execute("""
@@ -3427,6 +3434,27 @@ async def _sync_admin_messages(
             pass
 
 
+async def _delete_super_order_messages(msg_ids_raw: str) -> None:
+    """
+    Удаляет у высших админов старое сообщение "🆕 Заказ оформлен" после того,
+    как заказ подтверждён/отменён (город. админы работают через edit, высшим
+    вместо этого удаляем старое и, при необходимости, шлём новое отдельным
+    сообщением — чтобы гарантированно пришло уведомление).
+    msg_ids_raw — строка вида "chat_id:msg_id,chat_id:msg_id,..."
+    """
+    if not msg_ids_raw:
+        return
+    for entry in msg_ids_raw.split(","):
+        entry = entry.strip()
+        if ":" not in entry:
+            continue
+        try:
+            chat_id_str, msg_id_str = entry.split(":", 1)
+            await bot.delete_message(chat_id=int(chat_id_str), message_id=int(msg_id_str))
+        except Exception:
+            pass
+
+
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_issued_"))
 async def gift_issued(call):
     if not is_admin(call.from_user.id):
@@ -4476,11 +4504,19 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
         + (f"\n🎁 Сэкономлено: {discount}€" if discount else "")
         + f"\n{payment_label}"
     )
+    super_msg_ids = []
     for super_id in SUPER_ADMINS:
         try:
-            await bot.send_message(super_id, super_notify)
+            sent = await bot.send_message(super_id, super_notify)
+            super_msg_ids.append(f"{super_id}:{sent.message_id}")
         except Exception:
             pass
+    if super_msg_ids:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE orders SET super_message_ids=$1 WHERE id=$2",
+                ",".join(super_msg_ids), order_id
+            )
 
 
 # --- USDT ---
@@ -4700,7 +4736,7 @@ async def admin_confirm(call):
 
     async with pool.acquire() as conn:
         order = await conn.fetchrow("""
-            SELECT user_id, items, status, admin_message_ids, discount, total, city_key, created_at
+            SELECT user_id, items, status, admin_message_ids, super_message_ids, discount, total, city_key, created_at
             FROM orders 
             WHERE id=$1
         """, order_id)
@@ -4720,6 +4756,7 @@ async def admin_confirm(call):
     user_id = order["user_id"]
     items = order["items"]
     msg_ids_raw = order["admin_message_ids"] or ""
+    super_msg_ids_raw = order["super_message_ids"] or ""
     order_discount = order["discount"] or 0
     order_total = order["total"] or 0
     order_city_name = CITIES.get(order_city, {}).get("name", order_city)
@@ -4884,8 +4921,10 @@ async def admin_confirm(call):
         base_text=call.message.text,
         status_self="\n\n✅ ПОДТВЕРЖДЕНО",
         status_others=f"\n\n✅ ПОДТВЕРЖДЕНО @{admin_username}",
-        super_admin_ids=SUPER_ADMINS,
     )
+
+    # Удаляем у высших админов старое сообщение "🆕 Заказ оформлен"
+    await _delete_super_order_messages(super_msg_ids_raw)
 
     # Уведомляем высших админов о подтверждённом заказе (если подтвердил городской)
     if not is_super_admin(actor_id):
@@ -4941,7 +4980,7 @@ async def admin_cancel(call):
 
     async with pool.acquire() as conn:
         order = await conn.fetchrow("""
-            SELECT status, admin_message_ids, user_id, items, total, discount, city_key, created_at
+            SELECT status, admin_message_ids, super_message_ids, user_id, items, total, discount, city_key, created_at
             FROM orders
             WHERE id=$1
         """, order_id)
@@ -4951,6 +4990,7 @@ async def admin_cancel(call):
         return
 
     msg_ids_raw = order["admin_message_ids"] or ""
+    super_msg_ids_raw = order["super_message_ids"] or ""
 
     async with pool.acquire() as conn:
         await conn.execute(
@@ -4967,8 +5007,10 @@ async def admin_cancel(call):
         base_text=call.message.text,
         status_self="\n\n❌ ОТМЕНЕНО",
         status_others=f"\n\n❌ ОТМЕНЕНО @{admin_username}",
-        super_admin_ids=SUPER_ADMINS,
     )
+
+    # Удаляем у высших админов старое сообщение "🆕 Заказ оформлен"
+    await _delete_super_order_messages(super_msg_ids_raw)
 
     # Уведомляем высших админов об отменённом заказе (если отменил городской)
     if not is_super_admin(call.from_user.id):
@@ -5945,7 +5987,7 @@ async def cancelorder_cmd(message: types.Message):
     order_id = int(args)
     async with pool.acquire() as conn:
         order = await conn.fetchrow(
-            "SELECT status, admin_message_ids, city_key FROM orders WHERE id=$1", order_id
+            "SELECT status, admin_message_ids, super_message_ids, city_key FROM orders WHERE id=$1", order_id
         )
 
     if not order:
@@ -5977,6 +6019,9 @@ async def cancelorder_cmd(message: types.Message):
         status_self=f"\n\n❌ ОТМЕНЕНО командой /cancelorder",
         status_others=f"\n\n❌ ОТМЕНЕНО @{admin_username} командой /cancelorder"
     )
+
+    # Удаляем у высших админов старое сообщение "🆕 Заказ оформлен"
+    await _delete_super_order_messages(order["super_message_ids"] or "")
 
 
 # ── /stats ────────────────────────────────────────────────────────────────────
