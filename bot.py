@@ -3368,8 +3368,10 @@ async def gift_apply(call):
     )
 
     # Рассылаем городским админам и запоминаем message_id
+    city_admin_ids = get_city_admins(resolved_city)
+    recipients = city_admin_ids if city_admin_ids else ADMIN_IDS  # fallback
     msg_ids = []
-    for admin_id in city_admin_ids:
+    for admin_id in recipients:
         try:
             sent = await bot.send_message(admin_id, admin_text, reply_markup=admin_kb)
             msg_ids.append(f"{admin_id}:{sent.message_id}")
