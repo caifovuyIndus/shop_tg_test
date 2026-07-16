@@ -3519,7 +3519,8 @@ async def gift_issued(call):
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT status, admin_message_ids, super_message_ids FROM gift_requests WHERE id=$1", request_id
+            "SELECT status, admin_message_ids, super_message_ids, user_id, product_id, username, city_key, created_at "
+            "FROM gift_requests WHERE id=$1", request_id
         )
 
     if not row or row["status"] != "pending":
@@ -3532,6 +3533,12 @@ async def gift_issued(call):
         )
         # Финализируем резерв (stock уже уменьшен при оформлении)
         await finalize_reserved_stock(conn, -request_id)
+        # Списываем промокод (бонус уже был списан на этапе gift_apply,
+        # но promo_code/promo_type оставались висеть на юзере — блокируя новые активации)
+        await conn.execute(
+            "UPDATE users SET promo_code=NULL, promo_type=NULL WHERE user_id=$1",
+            row["user_id"]
+        )
 
     await call.answer("✅ Выдано")
 
@@ -3546,6 +3553,33 @@ async def gift_issued(call):
     # Удаляем у высших админов старое сообщение "🆕 Заявка на бесплатную банку оформлена"
     await _delete_super_order_messages(row["super_message_ids"] or "")
 
+    # Уведомляем высших админов о выдаче (если выдал городской)
+    if not is_super_admin(actor_id):
+        city_name = CITIES.get(row["city_key"] or "", {}).get("name", row["city_key"] or "—")
+        async with pool.acquire() as conn:
+            product_name = await conn.fetchval(
+                "SELECT name_ru FROM products WHERE id=$1", row["product_id"]
+            )
+        buyer_uname = row["username"]
+        buyer_label = f"@{buyer_uname}" if buyer_uname and buyer_uname != "unknown" else f"id{row['user_id']}"
+        created_str = row["created_at"].strftime("%d.%m.%Y %H:%M") if row["created_at"] else "—"
+        issued_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        product_label = product_name or f"#{row['product_id']}"
+
+        super_notify = (
+            f"✅ Заявка на бесплатную банку #{request_id} выдана\n\n"
+            f"🏙 Город: {city_name}\n"
+            f"👤 Покупатель: {buyer_label}\n"
+            f"👮 Выдал: @{admin_username}\n"
+            f"📦 Товар: {product_label}"
+            f"\n\n📅 Оформлена: {created_str}\n✅ Выдана: {issued_str}"
+        )
+        for super_id in SUPER_ADMINS:
+            try:
+                await bot.send_message(super_id, super_notify)
+            except Exception:
+                pass
+
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_rejected_"))
 async def gift_rejected(call):
     if not is_admin(call.from_user.id):
@@ -3557,7 +3591,8 @@ async def gift_rejected(call):
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT status, admin_message_ids, super_message_ids FROM gift_requests WHERE id=$1", request_id
+            "SELECT status, admin_message_ids, super_message_ids, user_id, product_id, username, city_key, created_at "
+            "FROM gift_requests WHERE id=$1", request_id
         )
 
     if not row or row["status"] != "pending":
@@ -3570,6 +3605,12 @@ async def gift_rejected(call):
         )
         # Возвращаем зарезервированный stock
         await release_reserved_stock(conn, -request_id)
+        # Бонус (free_jar_bonus) НЕ возвращается — по ТЗ, но promo_code/promo_type
+        # нужно снять, иначе юзер навсегда заблокирован от активации новых промокодов
+        await conn.execute(
+            "UPDATE users SET promo_code=NULL, promo_type=NULL WHERE user_id=$1",
+            row["user_id"]
+        )
 
     # Бонус НЕ возвращается — по ТЗ
     await call.answer("❌ Отменено")
@@ -3584,6 +3625,33 @@ async def gift_rejected(call):
 
     # Удаляем у высших админов старое сообщение "🆕 Заявка на бесплатную банку оформлена"
     await _delete_super_order_messages(row["super_message_ids"] or "")
+
+    # Уведомляем высших админов об отмене (если отменил городской)
+    if not is_super_admin(actor_id):
+        city_name = CITIES.get(row["city_key"] or "", {}).get("name", row["city_key"] or "—")
+        async with pool.acquire() as conn:
+            product_name = await conn.fetchval(
+                "SELECT name_ru FROM products WHERE id=$1", row["product_id"]
+            )
+        buyer_uname = row["username"]
+        buyer_label = f"@{buyer_uname}" if buyer_uname and buyer_uname != "unknown" else f"id{row['user_id']}"
+        created_str = row["created_at"].strftime("%d.%m.%Y %H:%M") if row["created_at"] else "—"
+        rejected_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        product_label = product_name or f"#{row['product_id']}"
+
+        super_notify = (
+            f"❌ Заявка на бесплатную банку #{request_id} отменена\n\n"
+            f"🏙 Город: {city_name}\n"
+            f"👤 Покупатель: {buyer_label}\n"
+            f"👮 Отменил: @{admin_username}\n"
+            f"📦 Товар: {product_label}"
+            f"\n\n📅 Оформлена: {created_str}\n❌ Отменена: {rejected_str}"
+        )
+        for super_id in SUPER_ADMINS:
+            try:
+                await bot.send_message(super_id, super_notify)
+            except Exception:
+                pass
 
 # ========== ОБНОВЛЕНИЕ СТАТИСТИКИ ==========
 
