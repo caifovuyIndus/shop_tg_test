@@ -25,7 +25,7 @@ bot = Bot(token=BOT_TOKEN)
 # При старте загружаются в CITIES; обновляются командами /addcity, /removecity, /editcity.
 # Чтобы добавить нового высшего админа — добавить ID в SUPER_ADMINS.
 
-SUPER_ADMINS: list[int] = [7805603791, 8283121468]   # высшие админы (видят все города)
+SUPER_ADMINS: list[int] = [7805603791]   # высшие админы (видят все города)
 
 # CITIES заполняется из БД при init_db() и обновляется командами управления городами.
 # Структура: {city_key: {"name": str, "stock_pool": str, "admins": [int, ...]}}
@@ -36,7 +36,7 @@ _CITIES_DEFAULTS: dict[str, dict] = {
     "buerhausen": {
         "name": "Buerhausen",
         "stock_pool": "default",
-        "admins": [5317145892],
+        "admins": [8283121468], #5317145892
     },
     "munich": {
         "name": "Munich",
