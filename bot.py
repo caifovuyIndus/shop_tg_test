@@ -3387,14 +3387,18 @@ async def _sync_admin_messages(
     base_text: str,
     status_self: str,
     status_others: str,
+    super_admin_ids: list | None = None,
 ) -> None:
     """
     Редактирует сообщения у всех админов после подтверждения/отмены.
     msg_ids_raw — строка вида "chat_id:msg_id,chat_id:msg_id,..."
     Актор получает status_self, остальные — status_others. Кнопки убираются.
+    Для высших админов (super_admin_ids): старое сообщение удаляется и отправляется новое
+    (чтобы приходило уведомление). Городские — через edit.
     """
     if not msg_ids_raw:
         return
+    _super_ids = set(super_admin_ids or [])
     for entry in msg_ids_raw.split(","):
         entry = entry.strip()
         if ":" not in entry:
@@ -3405,12 +3409,20 @@ async def _sync_admin_messages(
             msg_id = int(msg_id_str)
             suffix = status_self if chat_id == actor_id else status_others
             new_text = base_text + suffix
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=new_text,
-                reply_markup=None,
-            )
+            if chat_id in _super_ids:
+                # Для высших: удаляем старое, отправляем новое (даёт уведомление)
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                except Exception:
+                    pass
+                await bot.send_message(chat_id=chat_id, text=new_text)
+            else:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=new_text,
+                    reply_markup=None,
+                )
         except Exception:
             pass
 
@@ -4451,12 +4463,16 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
     total_line = next((l for l in payment_line.split("\n") if "ИТОГО" in l), "")
     total_str = total_line.replace("ИТОГО:", "").replace("ИТОГО", "").strip() if total_line else "—"
 
+    # Конвертированная сумма из payment_line (строка "К оплате")
+    converted_line = next((l for l in payment_line.split("\n") if "К оплате" in l), "")
+
     super_notify = (
         f"🆕 Заказ #{order_id} оформлен\n\n"
         f"🏙 Город: {city_name}\n"
         f"👤 Покупатель: {buyer_label}\n"
         f"📦 Товары:\n{items_readable}\n"
         f"💰 Итого: {total_str}"
+        + (f"\n💱 {converted_line}" if converted_line else "")
         + (f"\n🎁 Сэкономлено: {discount}€" if discount else "")
         + f"\n{payment_label}"
     )
@@ -4867,7 +4883,8 @@ async def admin_confirm(call):
         actor_id=actor_id,
         base_text=call.message.text,
         status_self="\n\n✅ ПОДТВЕРЖДЕНО",
-        status_others=f"\n\n✅ ПОДТВЕРЖДЕНО @{admin_username}"
+        status_others=f"\n\n✅ ПОДТВЕРЖДЕНО @{admin_username}",
+        super_admin_ids=SUPER_ADMINS,
     )
 
     # Уведомляем высших админов о подтверждённом заказе (если подтвердил городской)
@@ -4949,7 +4966,8 @@ async def admin_cancel(call):
         actor_id=call.from_user.id,
         base_text=call.message.text,
         status_self="\n\n❌ ОТМЕНЕНО",
-        status_others=f"\n\n❌ ОТМЕНЕНО @{admin_username}"
+        status_others=f"\n\n❌ ОТМЕНЕНО @{admin_username}",
+        super_admin_ids=SUPER_ADMINS,
     )
 
     # Уведомляем высших админов об отменённом заказе (если отменил городской)
