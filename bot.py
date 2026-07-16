@@ -429,6 +429,10 @@ async def init_db():
             ALTER TABLE gift_requests
             ADD COLUMN IF NOT EXISTS city_key TEXT DEFAULT NULL
         """)
+        await conn.execute("""
+            ALTER TABLE gift_requests
+            ADD COLUMN IF NOT EXISTS super_message_ids TEXT DEFAULT ''
+        """)
 
         # ======= ДОСТАВКА =======
         # Текущий режим UI (delivery_mode=true → пользователь видит магазин
@@ -3354,11 +3358,32 @@ async def gift_apply(call):
 
     name_ru = p["name_ru"]
 
+    await _send_gift_request_to_admins(
+        request_id, uid, username, name_ru, city_key=resolved_city
+    )
+
+    # Подтверждение пользователю
+    await render(call, await t(uid, "gift_done"))
+    await notify_no_username(call, uid)
+
+
+async def _send_gift_request_to_admins(request_id: int, uid: int, username: str,
+                                        product_name: str,
+                                        city_key: str | None = None) -> None:
+    """
+    Отправляет заявку на бесплатную банку городским админам (с кнопками) и
+    высшим (без кнопок, отдельным уведомлением) — по аналогии с обычными
+    заказами (см. _send_order_to_admins).
+    city_key: ключ из CITIES или None (→ fallback на buerhausen).
+    """
+    resolved_city = get_order_city(city_key)
+    city_name = CITIES[resolved_city]["name"]
+
     admin_text = (
         f"🎁 Бесплатная банка\n\n"
-        f"🏙 Город: {CITIES.get(resolved_city, {}).get('name', resolved_city)}\n"
+        f"🏙 Город: {city_name}\n"
         f"Пользователь: @{username}\n\n"
-        f"Выбранный товар:\n{name_ru}"
+        f"Выбранный товар:\n{product_name}"
     )
 
     admin_kb = InlineKeyboardMarkup()
@@ -3367,27 +3392,53 @@ async def gift_apply(call):
         InlineKeyboardButton("❌ Отменить", callback_data=f"gift_rejected_{request_id}")
     )
 
-    # Рассылаем городским админам и запоминаем message_id
+    # Рассылаем только городским админам нужного города
     city_admin_ids = get_city_admins(resolved_city)
     recipients = city_admin_ids if city_admin_ids else ADMIN_IDS  # fallback
+
     msg_ids = []
+    failed_admins = []
     for admin_id in recipients:
         try:
             sent = await bot.send_message(admin_id, admin_text, reply_markup=admin_kb)
             msg_ids.append(f"{admin_id}:{sent.message_id}")
+        except Exception as e:
+            failed_admins.append(str(admin_id))
+            logger.error("Failed to notify admin %s for gift request %s: %s", admin_id, request_id, e)
+    if failed_admins:
+        await alert_super_admins(
+            f"Не удалось отправить заявку на бесплатную банку #{request_id} админам: {', '.join(failed_admins)}. "
+            f"Заявка существует в БД, но сообщение не доставлено."
+        )
+    if msg_ids:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE gift_requests SET admin_message_ids=$1, city_key=$2 WHERE id=$3",
+                ",".join(msg_ids), resolved_city, request_id
+            )
+
+    # Уведомление высшим админам о новой заявке (без кнопок, отдельным сообщением)
+    buyer_label = f"@{username}" if username and not username.isdigit() else f"id{uid}"
+
+    super_notify = (
+        f"🆕 Заявка на бесплатную банку #{request_id} оформлена\n\n"
+        f"🏙 Город: {city_name}\n"
+        f"👤 Покупатель: {buyer_label}\n"
+        f"📦 Товар: {product_name}"
+    )
+    super_msg_ids = []
+    for super_id in SUPER_ADMINS:
+        try:
+            sent = await bot.send_message(super_id, super_notify)
+            super_msg_ids.append(f"{super_id}:{sent.message_id}")
         except Exception:
             pass
-
-    # Сохраняем message_ids и city_key в заявке
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE gift_requests SET admin_message_ids=$1, city_key=$2 WHERE id=$3
-        """, ",".join(msg_ids), resolved_city, request_id)
-
-    # Подтверждение пользователю
-    await render(call, await t(uid, "gift_done"))
-    await notify_no_username(call, uid)
-
+    if super_msg_ids:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE gift_requests SET super_message_ids=$1 WHERE id=$2",
+                ",".join(super_msg_ids), request_id
+            )
 
 
 async def _sync_admin_messages(
@@ -3468,7 +3519,7 @@ async def gift_issued(call):
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT status, admin_message_ids FROM gift_requests WHERE id=$1", request_id
+            "SELECT status, admin_message_ids, super_message_ids FROM gift_requests WHERE id=$1", request_id
         )
 
     if not row or row["status"] != "pending":
@@ -3492,6 +3543,9 @@ async def gift_issued(call):
         status_others=f"\n\n✅ ВЫДАНО @{admin_username}"
     )
 
+    # Удаляем у высших админов старое сообщение "🆕 Заявка на бесплатную банку оформлена"
+    await _delete_super_order_messages(row["super_message_ids"] or "")
+
 @dp.callback_query_handler(lambda c: c.data.startswith("gift_rejected_"))
 async def gift_rejected(call):
     if not is_admin(call.from_user.id):
@@ -3503,7 +3557,7 @@ async def gift_rejected(call):
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT status, admin_message_ids FROM gift_requests WHERE id=$1", request_id
+            "SELECT status, admin_message_ids, super_message_ids FROM gift_requests WHERE id=$1", request_id
         )
 
     if not row or row["status"] != "pending":
@@ -3527,6 +3581,9 @@ async def gift_rejected(call):
         status_self="\n\n❌ ОТМЕНЕНО",
         status_others=f"\n\n❌ ОТМЕНЕНО @{admin_username}"
     )
+
+    # Удаляем у высших админов старое сообщение "🆕 Заявка на бесплатную банку оформлена"
+    await _delete_super_order_messages(row["super_message_ids"] or "")
 
 # ========== ОБНОВЛЕНИЕ СТАТИСТИКИ ==========
 
