@@ -4307,7 +4307,8 @@ async def confirm_cash(call):
 
     payment_line = f"Оплата: Наличные\nИТОГО: {total}€"
     await _send_order_to_admins(
-        order_id, uid, username, text_admin, payment_line, city_key=resolved_city
+        order_id, uid, username, text_admin, payment_line,
+        city_key=resolved_city, items_str=items_str, discount=discount
     )
 
 # ========== НОВЫЕ СПОСОБЫ ОПЛАТЫ (DELIVERY) ==========
@@ -4373,11 +4374,14 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
 
 async def _send_order_to_admins(order_id: int, uid: int, username: str,
                                  text_admin: str, payment_line: str,
-                                 city_key: str | None = None) -> None:
+                                 city_key: str | None = None,
+                                 items_str: str = "",
+                                 discount: float = 0.0) -> None:
     """
-    Отправляет заказ городским админам (и только им).
-    Высшие админы получают уведомление только ПОСЛЕ подтверждения городским.
+    Отправляет заказ городским админам (с кнопками) и высшим (без кнопок, в стиле confirm/cancel).
     city_key: ключ из CITIES или None (→ fallback на buerhausen).
+    items_str: строка вида "pid:qty,pid:qty" — для красивого текста высшим.
+    discount: скидка в € — показывается высшим если > 0.
     """
     resolved_city = get_order_city(city_key)
     city_name = CITIES[resolved_city]["name"]
@@ -4419,6 +4423,48 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
                 "UPDATE orders SET admin_message_ids=$1, city_key=$2 WHERE id=$3",
                 ",".join(msg_ids), resolved_city, order_id
             )
+
+    # Уведомление высшим админам о новом заказе (без кнопок, без дат)
+    item_parts = [p for p in items_str.split(",") if ":" in p]
+    pids = [int(p.split(":")[0]) for p in item_parts]
+    try:
+        async with pool.acquire() as conn:
+            prod_rows = await conn.fetch(
+                "SELECT id, name_ru FROM products WHERE id = ANY($1::int[])", pids
+            ) if pids else []
+        prod_map = {r["id"]: r["name_ru"] for r in prod_rows}
+        items_readable = "\n".join(
+            f"  • {prod_map.get(int(p.split(':')[0]), p.split(':')[0])} x{p.split(':')[1]}"
+            for p in item_parts
+        )
+    except Exception:
+        items_readable = "\n".join(
+            f"  • #{p.split(':')[0]} x{p.split(':')[1]}" for p in item_parts
+        )
+
+    # Определяем способ оплаты из payment_line (первая строка)
+    payment_label = payment_line.split("\n")[0] if payment_line else "—"
+
+    buyer_label = f"@{username}" if username and not username.isdigit() else f"id{uid}"
+
+    # Сумма из payment_line (строка ИТОГО)
+    total_line = next((l for l in payment_line.split("\n") if "ИТОГО" in l), "")
+    total_str = total_line.replace("ИТОГО:", "").replace("ИТОГО", "").strip() if total_line else "—"
+
+    super_notify = (
+        f"🆕 Заказ #{order_id} оформлен\n\n"
+        f"🏙 Город: {city_name}\n"
+        f"👤 Покупатель: {buyer_label}\n"
+        f"📦 Товары:\n{items_readable}\n"
+        f"💰 Итого: {total_str}"
+        + (f"\n🎁 Сэкономлено: {discount}€" if discount else "")
+        + f"\n{payment_label}"
+    )
+    for super_id in SUPER_ADMINS:
+        try:
+            await bot.send_message(super_id, super_notify)
+        except Exception:
+            pass
 
 
 # --- USDT ---
@@ -4485,7 +4531,7 @@ async def paid_usdt(call):
         f"К оплате: {usdt_str} USDT\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city, items_str=items_str, discount=discount)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -4555,7 +4601,7 @@ async def paid_card_eur(call):
         f"Оплата: Банковская карта EUR (ожидает проверки)\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city, items_str=items_str, discount=discount)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -4623,7 +4669,7 @@ async def paid_card_uah(call):
         f"К оплате: {uah_str} UAH\n"
         f"ИТОГО: {eur_str}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city)
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city, items_str=items_str, discount=discount)
     await render(call, await t(uid, "pay_pending_user"))
     await notify_no_username(call, uid)
 
@@ -4638,7 +4684,7 @@ async def admin_confirm(call):
 
     async with pool.acquire() as conn:
         order = await conn.fetchrow("""
-            SELECT user_id, items, status, admin_message_ids, discount, total, city_key
+            SELECT user_id, items, status, admin_message_ids, discount, total, city_key, created_at
             FROM orders 
             WHERE id=$1
         """, order_id)
@@ -4826,32 +4872,41 @@ async def admin_confirm(call):
 
     # Уведомляем высших админов о подтверждённом заказе (если подтвердил городской)
     if not is_super_admin(actor_id):
-        items_readable = "\n".join(
-            f"  • {part.split(':')[0]} x{part.split(':')[1]}"
-            for part in (items or "").split(",") if ":" in part
-        )
-        # Пытаемся подставить имена товаров (best-effort)
+        # Батч-запрос: имена товаров + username покупателя
+        item_parts = [p for p in (items or "").split(",") if ":" in p]
+        pids = [int(p.split(":")[0]) for p in item_parts]
         try:
             async with pool.acquire() as conn:
-                items_readable_parts = []
-                for part in (items or "").split(","):
-                    if ":" not in part:
-                        continue
-                    pid_s, qty_s = part.split(":", 1)
-                    name = await conn.fetchval(
-                        "SELECT name_ru FROM products WHERE id=$1", int(pid_s)
-                    )
-                    items_readable_parts.append(f"  • {name or pid_s} x{qty_s}")
-                items_readable = "\n".join(items_readable_parts)
+                prod_rows = await conn.fetch(
+                    "SELECT id, name_ru FROM products WHERE id = ANY($1::int[])", pids
+                )
+                buyer_uname = await conn.fetchval(
+                    "SELECT username FROM users WHERE user_id=$1", user_id
+                )
+            prod_map = {r["id"]: r["name_ru"] for r in prod_rows}
+            items_readable = "\n".join(
+                f"  • {prod_map.get(int(p.split(':')[0]), p.split(':')[0])} x{p.split(':')[1]}"
+                for p in item_parts
+            )
         except Exception:
-            pass
+            items_readable = "\n".join(
+                f"  • #{p.split(':')[0]} x{p.split(':')[1]}" for p in item_parts
+            )
+            buyer_uname = None
+
+        buyer_label = f"@{buyer_uname}" if buyer_uname else f"id{user_id}"
+        created_str = order["created_at"].strftime("%d.%m.%Y %H:%M") if order["created_at"] else "—"
+        confirmed_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
         super_notify = (
             f"✅ Заказ #{order_id} подтверждён\n\n"
             f"🏙 Город: {order_city_name}\n"
-            f"👤 Подтвердил: @{admin_username}\n"
+            f"👤 Покупатель: {buyer_label}\n"
+            f"👮 Подтвердил: @{admin_username}\n"
             f"📦 Товары:\n{items_readable}\n"
             f"💰 Итого: {order_total}€"
+            + (f"\n🎁 Сэкономлено: {order_discount}€" if order_discount else "")
+            + f"\n\n📅 Оформлен: {created_str}\n✅ Подтверждён: {confirmed_str}"
         )
         for super_id in SUPER_ADMINS:
             try:
@@ -4869,7 +4924,7 @@ async def admin_cancel(call):
 
     async with pool.acquire() as conn:
         order = await conn.fetchrow("""
-            SELECT status, admin_message_ids
+            SELECT status, admin_message_ids, user_id, items, total, discount, city_key, created_at
             FROM orders
             WHERE id=$1
         """, order_id)
@@ -4896,6 +4951,55 @@ async def admin_cancel(call):
         status_self="\n\n❌ ОТМЕНЕНО",
         status_others=f"\n\n❌ ОТМЕНЕНО @{admin_username}"
     )
+
+    # Уведомляем высших админов об отменённом заказе (если отменил городской)
+    if not is_super_admin(call.from_user.id):
+        order_city_name = CITIES.get(order["city_key"] or "", {}).get("name", order["city_key"] or "—")
+        order_total = order["total"] or 0
+        order_discount = order["discount"] or 0
+        user_id = order["user_id"]
+        items = order["items"] or ""
+
+        item_parts = [p for p in items.split(",") if ":" in p]
+        pids = [int(p.split(":")[0]) for p in item_parts]
+        try:
+            async with pool.acquire() as conn:
+                prod_rows = await conn.fetch(
+                    "SELECT id, name_ru FROM products WHERE id = ANY($1::int[])", pids
+                )
+                buyer_uname = await conn.fetchval(
+                    "SELECT username FROM users WHERE user_id=$1", user_id
+                )
+            prod_map = {r["id"]: r["name_ru"] for r in prod_rows}
+            items_readable = "\n".join(
+                f"  • {prod_map.get(int(p.split(':')[0]), p.split(':')[0])} x{p.split(':')[1]}"
+                for p in item_parts
+            )
+        except Exception:
+            items_readable = "\n".join(
+                f"  • #{p.split(':')[0]} x{p.split(':')[1]}" for p in item_parts
+            )
+            buyer_uname = None
+
+        buyer_label = f"@{buyer_uname}" if buyer_uname else f"id{user_id}"
+        created_str = order["created_at"].strftime("%d.%m.%Y %H:%M") if order["created_at"] else "—"
+        cancelled_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+        super_notify = (
+            f"❌ Заказ #{order_id} отменён\n\n"
+            f"🏙 Город: {order_city_name}\n"
+            f"👤 Покупатель: {buyer_label}\n"
+            f"👮 Отменил: @{admin_username}\n"
+            f"📦 Товары:\n{items_readable}\n"
+            f"💰 Итого: {order_total}€"
+            + (f"\n🎁 Сэкономлено: {order_discount}€" if order_discount else "")
+            + f"\n\n📅 Оформлен: {created_str}\n❌ Отменён: {cancelled_str}"
+        )
+        for super_id in SUPER_ADMINS:
+            try:
+                await bot.send_message(super_id, super_notify)
+            except Exception:
+                pass
 
 # ========== ПРОМОКОДЫ ==========
 
@@ -5692,11 +5796,21 @@ async def pending_cmd(message: types.Message):
         await message.answer("✅ Нет ожидающих заказов.")
         return
 
+    # Получаем username пакетом для всех user_id
+    user_ids = list({r["user_id"] for r in rows})
+    async with pool.acquire() as conn:
+        user_rows = await conn.fetch(
+            "SELECT user_id, username FROM users WHERE user_id = ANY($1::bigint[])", user_ids
+        )
+    username_map = {r["user_id"]: r["username"] for r in user_rows}
+
     lines = [f"⏳ Ожидающих заказов: {len(rows)}\n"]
     for r in rows:
         city_label = f" [{CITIES.get(r['city_key'], {}).get('name', r['city_key'])}]" if not actor_city else ""
         dt = r["created_at"].strftime("%d.%m %H:%M") if r["created_at"] else "—"
-        lines.append(f"#{r['id']}{city_label} | {r['total']}€ | {r['payment']} | {dt}")
+        uname = username_map.get(r["user_id"])
+        user_label = f"@{uname}" if uname else f"id{r['user_id']}"
+        lines.append(f"#{r['id']}{city_label} | {user_label} | {r['total']}€ | {r['payment']} | {dt}")
 
     # Добавляем ожидающие gift-заявки
     async with pool.acquire() as conn:
@@ -5764,7 +5878,12 @@ async def order_cmd(message: types.Message):
     delivery_label = "🚚 Доставка" if order["is_delivery"] else "🏪 Самовывоз"
     dt = order["created_at"].strftime("%d.%m.%Y %H:%M") if order["created_at"] else "—"
 
-    # Читаем имена товаров
+    async with pool.acquire() as conn:
+        uname = await conn.fetchval(
+            "SELECT username FROM users WHERE user_id=$1", order["user_id"]
+        )
+    user_label = f"@{uname}" if uname else f"id{order['user_id']}"
+
     lines = [
         f"📦 Заказ #{order_id}",
         f"Статус: {order['status']}",
@@ -5772,7 +5891,7 @@ async def order_cmd(message: types.Message):
         f"Оплата: {order['payment']}",
         f"Итого: {order['total']}€ (скидка: {order['discount'] or 0}€)",
         f"Дата: {dt}",
-        f"User ID: {order['user_id']}",
+        f"Пользователь: {user_label}",
         "Товары:",
     ]
     # Батч-запрос имён товаров
