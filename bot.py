@@ -207,6 +207,66 @@ async def get_bot_username() -> str:
 _rate_cache: dict = {}
 _RATE_TTL = 1800  # 30 минут
 
+# ========== АДМИН-ЧАТЫ (личная переписка супер-админа с пользователем) ==========
+# Зеркало таблицы admin_chats в памяти для быстрой маршрутизации сообщений
+# без похода в БД на каждое сообщение. Загружается при старте (см. on_startup).
+_active_chat_by_admin: dict[int, int] = {}   # admin_id  -> user_id
+_active_chat_by_user:  dict[int, int] = {}   # user_id   -> admin_id
+
+
+async def _load_admin_chats() -> None:
+    """Загружает активные админ-чаты из БД в память (вызывается при старте бота)."""
+    global _active_chat_by_admin, _active_chat_by_user
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT admin_id, user_id FROM admin_chats")
+    _active_chat_by_admin = {r["admin_id"]: r["user_id"] for r in rows}
+    _active_chat_by_user = {r["user_id"]: r["admin_id"] for r in rows}
+
+
+# Регистрируем эти хендлеры МАКСИМАЛЬНО РАНО (до всех кнопочных хендлеров вроде
+# "Магазин"/"Корзина"/"Профиль"), чтобы пока чат открыт — вообще любой обычный
+# текст (в т.ч. случайно совпавший с текстом кнопки) уходил в чат, а не в меню.
+@dp.message_handler(
+    lambda m: (
+        m.from_user.id in _active_chat_by_admin
+        and not (m.text or "").startswith("/")
+    ),
+    state=None,
+    content_types=types.ContentTypes.TEXT,
+)
+async def admin_chat_relay(message: types.Message):
+    """Пока у админа открыт чат — любой его обычный текст пересылается пользователю как есть."""
+    if not is_super_admin(message.from_user.id):
+        return
+    target_uid = _active_chat_by_admin.get(message.from_user.id)
+    if not target_uid:
+        return
+    try:
+        await bot.send_message(target_uid, message.text)
+    except Exception as e:
+        await message.answer(f"❌ Не удалось доставить сообщение: {e}")
+
+
+@dp.message_handler(
+    lambda m: (
+        m.from_user.id in _active_chat_by_user
+        and not (m.text or "").startswith("/")
+    ),
+    state=None,
+    content_types=types.ContentTypes.TEXT,
+)
+async def user_chat_relay(message: types.Message):
+    """Пока пользователь в чате с админом — все его обычные сообщения идут только этому админу."""
+    admin_id = _active_chat_by_user.get(message.from_user.id)
+    if not admin_id:
+        return
+    uname = message.from_user.username
+    label = f"@{uname}" if uname else f"id{message.from_user.id}"
+    try:
+        await bot.send_message(admin_id, f"💬 {label}:\n{message.text}")
+    except Exception:
+        pass
+
 # ========== БАЗА ДАННЫХ ==========
 
 pool = None
@@ -533,6 +593,17 @@ async def init_db():
             status TEXT DEFAULT 'pending',
             admin_message_ids TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+        # Таблица активных личных чатов супер-админа с пользователем.
+        # Один активный чат на админа (admin_id PK) и на пользователя (user_id UNIQUE) —
+        # если у юзера уже открыт чат с другим админом, второй открыть чат не может.
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_chats (
+            admin_id BIGINT PRIMARY KEY,
+            user_id BIGINT UNIQUE NOT NULL,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
 
@@ -5490,6 +5561,109 @@ async def _handle_ban_command(message: types.Message, banned: bool):
         await message.answer(f"✅ Пользователь {arg} (ID {target_uid}) разблокирован")
 
 
+@dp.message_handler(commands=["msg"])
+async def msg_cmd(message: types.Message):
+    """
+    /msg <@username|user_id> <текст> — открыть (или продолжить) чат с пользователем
+    и отправить первое сообщение. Пока чат открыт, все следующие обычные сообщения
+    админа (без /) автоматически пересылаются этому же пользователю — /msg заново
+    вызывать не нужно. Завершить чат: /endchat.
+    """
+    if not is_super_admin(message.from_user.id):
+        return
+
+    admin_id = message.from_user.id
+    arg = message.get_args().strip()
+
+    if not arg or " " not in arg:
+        await message.answer(
+            "Использование: /msg <@username|user_id> <текст>\n"
+            "Пример: /msg @ivan_petrov Привет! Твой заказ уже готов.\n\n"
+            "После первого сообщения чат остаётся открытым — просто пиши обычным "
+            "текстом, и оно будет доставлено этому же пользователю.\n"
+            "Завершить чат: /endchat"
+        )
+        return
+
+    target_raw, text = arg.split(" ", 1)
+    text = text.strip()
+
+    if not text:
+        await message.answer("Текст сообщения не может быть пустым.")
+        return
+
+    target_uid = await _resolve_user(target_raw)
+
+    if not target_uid:
+        await message.answer(
+            "❌ Пользователь не найден. Если он ни разу не запускал бота, "
+            "написать ему нельзя — используй его Telegram ID, если он известен."
+        )
+        return
+
+    # Если у пользователя уже открыт чат с ДРУГИМ админом — отказываем
+    existing_admin = _active_chat_by_user.get(target_uid)
+    if existing_admin and existing_admin != admin_id:
+        await message.answer(
+            "❌ У этого пользователя уже открыт чат с другим админом. "
+            "Дождись, пока он завершит его через /endchat."
+        )
+        return
+
+    # Если у ЭТОГО админа уже открыт чат с другим пользователем — переключаем
+    prev_target = _active_chat_by_admin.get(admin_id)
+    switched_note = ""
+    if prev_target and prev_target != target_uid:
+        switched_note = f"\n(предыдущий чат с ID {prev_target} завершён автоматически)"
+
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO admin_chats (admin_id, user_id, started_at)
+            VALUES ($1, $2, CURRENT_TIMESTAMP)
+            ON CONFLICT (admin_id) DO UPDATE
+                SET user_id=$2, started_at=CURRENT_TIMESTAMP
+        """, admin_id, target_uid)
+
+    # Обновляем память
+    if prev_target and prev_target != target_uid:
+        _active_chat_by_user.pop(prev_target, None)
+    _active_chat_by_admin[admin_id] = target_uid
+    _active_chat_by_user[target_uid] = admin_id
+
+    try:
+        await bot.send_message(target_uid, text)
+    except Exception as e:
+        await message.answer(f"❌ Не удалось отправить сообщение: {e}")
+        return
+
+    await message.answer(
+        f"✅ Чат с {target_raw} (ID {target_uid}) открыт, сообщение отправлено.{switched_note}\n"
+        f"Пиши дальше обычным текстом — оно будет доставлено. Завершить: /endchat"
+    )
+
+
+@dp.message_handler(commands=["endchat"])
+async def endchat_cmd(message: types.Message):
+    """/endchat — завершить текущий открытый чат с пользователем (только super_admin)."""
+    if not is_super_admin(message.from_user.id):
+        return
+
+    admin_id = message.from_user.id
+    target_uid = _active_chat_by_admin.get(admin_id)
+
+    if not target_uid:
+        await message.answer("У тебя нет активного чата.")
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM admin_chats WHERE admin_id=$1", admin_id)
+
+    _active_chat_by_admin.pop(admin_id, None)
+    _active_chat_by_user.pop(target_uid, None)
+
+    await message.answer(f"✅ Чат с ID {target_uid} завершён.")
+
+
 @dp.message_handler(commands=["ban"])
 async def ban_cmd(message: types.Message):
     # /ban @username  или  /ban username  или  /ban user_id
@@ -6221,28 +6395,145 @@ async def user_cmd(message: types.Message):
             await message.answer("❌ Пользователь не найден.")
             return
 
+        uid = row["user_id"]
+
         order_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='confirmed'", row["user_id"]
+            "SELECT COUNT(*) FROM orders WHERE user_id=$1 AND status='confirmed'", uid
         )
 
+        # ── Статистика за последние 7 дней ──
+        week_rows = await conn.fetch("""
+            SELECT items, total, discount FROM orders
+            WHERE user_id=$1 AND status='confirmed' AND created_at >= NOW() - INTERVAL '7 days'
+        """, uid)
+
+        # ── Последний заказ (любой статус) ──
+        last_order = await conn.fetchrow("""
+            SELECT status, created_at FROM orders
+            WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1
+        """, uid)
+
+        # ── Активные заявки на бесплатную банку ──
+        pending_gift = await conn.fetchval(
+            "SELECT COUNT(*) FROM gift_requests WHERE user_id=$1 AND status='pending'", uid
+        )
+
+        # ── Сколько людей пригласил (всего, для справки) ──
+        total_invited = await conn.fetchval(
+            "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1", uid
+        )
+        activated_invited = await conn.fetchval(
+            "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND activated=1", uid
+        )
+
+    week_orders = len(week_rows)
+    week_jars = sum(
+        int(qty) for r in week_rows
+        for _, qty in (item.split(":") for item in (r["items"] or "").split(",") if ":" in item)
+    )
+    week_spent = sum(r["total"] or 0 for r in week_rows)
+    week_saved = sum(r["discount"] or 0 for r in week_rows)
+
     city_name = CITIES.get(row["city"] or "", {}).get("name", row["city"] or "не выбран")
+
+    rank = get_rank(row.get("total_items", 0) or 0)
+    rank_name = rank.get("name", {}).get("ru", rank.get("key", "—"))
+    rank_value = rank.get("value", 0)
+
+    # ── Прогресс до следующего ранга ──
+    ranks = DISCOUNTS.get("rank", [])
+    next_rank = next((r for r in ranks if r["need"] > (row.get("total_items", 0) or 0)), None)
+    next_rank_line = ""
+    if next_rank:
+        left = next_rank["need"] - (row.get("total_items", 0) or 0)
+        next_rank_line = f" (до {next_rank['name']['ru']}: ещё {left} шт.)"
+
+    # ── Активные скидки прямо сейчас ──
+    active_discounts = []
+    if rank_value:
+        active_discounts.append(f"  • Ранг {rank_name}: −{rank_value}€/банку")
+
+    streak = row.get("streak_weeks", 0) or 0
+    if streak:
+        streak_cfg = DISCOUNTS.get("streak", [])
+        streak_val = next((s["value"] for s in reversed(streak_cfg) if s["weeks"] <= streak), 0)
+        if streak_val:
+            active_discounts.append(f"  • Стрик {streak}нед.: −{streak_val}€/банку")
+
+    promo_discount = row.get("promo_discount", 0) or 0
+    promo_code = row.get("promo_code")
+    if promo_code and row.get("promo_type") == "discount" and promo_discount > 0:
+        active_discounts.append(f"  • Промокод {promo_code}: −{promo_discount}€ на заказ")
+    elif promo_code and row.get("promo_type") == "free_jar":
+        active_discounts.append(f"  • Промокод {promo_code}: бесплатная банка")
+
+    wheel_discount = row.get("current_discount", 0) or 0
+    if wheel_discount:
+        active_discounts.append(f"  • Рулетка: −{wheel_discount}€/банку (в запасе)")
+
+    ref_discount = row.get("ref_discount", 0) or 0
+    if ref_discount:
+        active_discounts.append(f"  • Реф. скидка (пригласил): −{ref_discount}€ на заказ")
+
+    ref_bonus = row.get("ref_bonus", 0) or 0
+    if ref_bonus:
+        active_discounts.append(f"  • Реф. бонус (пришёл по ссылке): −{ref_bonus}€ на заказ")
+
+    if row.get("free_jar_bonus"):
+        active_discounts.append(f"  • Бесплатная банка: доступна к выбору")
+
+    discounts_block = "\n".join(active_discounts) if active_discounts else "  • нет активных скидок"
+
+    # ── Прогресс рулетки ──
+    spin_progress = row.get("spin_progress", 0) or 0
+    spin_left = max(5 - spin_progress, 0)
+
+    # ── Последний заказ / дата последней активности ──
+    if last_order:
+        last_status_map = {"pending": "⏳ ожидает", "confirmed": "✅ подтверждён",
+                            "cancelled": "❌ отменён", "force_cancelled": "🚫 отменён (админ)"}
+        last_line = (
+            f"{last_order['created_at'].strftime('%d.%m.%Y %H:%M')} "
+            f"({last_status_map.get(last_order['status'], last_order['status'])})"
+        )
+    else:
+        last_line = "заказов не было"
+
     promo_line = ""
     if row.get("promo_code"):
         promo_line = f"\n🎟 Промокод: {row['promo_code']} ({row.get('promo_type','')})"
 
+    gift_pending_line = f"\n🎁 Ожидает выдачи банки: {pending_gift}" if pending_gift else ""
+
     text = (
         f"👤 Пользователь\n\n"
-        f"ID: {row['user_id']}\n"
+        f"ID: {uid}\n"
         f"Username: @{row['username'] or '—'}\n"
         f"Язык: {row.get('language', '—')}\n"
         f"Город: {city_name}\n"
         f"Заблокирован: {'да' if row.get('banned') else 'нет'}\n\n"
-        f"📦 Товаров куплено: {row.get('total_items', 0)}\n"
-        f"🧾 Подтв. заказов: {order_count}\n"
-        f"💸 Сэкономлено: {row.get('total_saved', 0):.2f}€\n\n"
-        f"🔥 Стрик: {row.get('streak_weeks', 0)} нед.\n"
-        f"🎁 Бесплатная банка: {'да' if row.get('free_jar_bonus') else 'нет'}"
-        f"{promo_line}"
+
+        f"🏆 Ранг: {rank_name}{next_rank_line}\n"
+        f"📦 Товаров куплено всего: {row.get('total_items', 0)}\n"
+        f"🧾 Подтв. заказов всего: {order_count}\n"
+        f"💶 Потрачено всего: {row.get('total_spent', 0):.2f}€\n"
+        f"💸 Сэкономлено всего: {row.get('total_saved', 0):.2f}€\n\n"
+
+        f"📅 За последние 7 дней:\n"
+        f"  • Заказов: {week_orders}\n"
+        f"  • Банок: {week_jars}\n"
+        f"  • Потрачено: {week_spent:.2f}€\n"
+        f"  • Сэкономлено: {week_saved:.2f}€\n\n"
+
+        f"🎯 Активные скидки:\n{discounts_block}\n\n"
+
+        f"🔥 Стрик: {streak} нед. (макс. {row.get('max_streak_weeks', 0)} нед.)\n"
+        f"🎰 Рулетка: {spin_progress}/5 (ещё {spin_left} до спина)\n"
+        f"👥 Рефералов: {total_invited} (активировано: {activated_invited})"
+        f"{gift_pending_line}"
+        f"{promo_line}\n\n"
+
+        f"🕐 Последний заказ: {last_line}"
     )
     await message.answer(text)
 
@@ -6689,6 +6980,7 @@ async def citymanage_cancel(call, state: FSMContext):
 
 async def on_startup(dp):
     await init_db()
+    await _load_admin_chats()
 
 
 async def run():
