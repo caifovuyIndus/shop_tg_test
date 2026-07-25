@@ -27,6 +27,8 @@ bot = Bot(token=BOT_TOKEN)
 
 SUPER_ADMINS: list[int] = [7805603791]   # высшие админы (видят все города)
 
+EXCLUDED_FROM_STATS: list[int] = [1518888796, 7805603791, 8283121468, 5317145892]
+
 # CITIES заполняется из БД при init_db() и обновляется командами управления городами.
 # Структура: {city_key: {"name": str, "stock_pool": str, "admins": [int, ...]}}
 CITIES: dict[str, dict] = {}
@@ -109,6 +111,37 @@ THROTTLE_WARN_AFTER = 3      # сколько раз предупредить п
 _throttle_map: dict[int, float] = {}      # uid → timestamp последнего action
 _throttle_warn:  dict[int, int]  = {}     # uid → сколько раз уже предупреждён
 
+# Кэш последнего известного username — чтобы не писать в БД на КАЖДЫЙ апдейт,
+# а только когда username реально изменился (появился/сменился/пропал).
+# Раньше username синхронизировался только на /start — если человек добавлял
+# username в Telegram и больше не заходил через /start, в БД он навсегда
+# оставался NULL, и все команды (/order, /pending, /user) показывали id
+# вместо @username, даже если у пользователя ник уже давно есть.
+_username_cache: dict[int, str | None] = {}
+
+
+async def _sync_username(uid: int, live_username: str | None) -> None:
+    """
+    Обновляет username в БД, если он отличается от последнего известного (best-effort).
+    ВАЖНО: кэшируем как «синхронизировано» только если UPDATE реально задел строку.
+    Для совсем нового пользователя (первый /start) строки в users ещё нет —
+    UPDATE вернёт 0 затронутых строк, и мы НЕ кэшируем, чтобы попытка повторилась
+    на следующем же апдейте (когда /start уже успеет сделать INSERT).
+    """
+    if uid in _username_cache and _username_cache[uid] == live_username:
+        return
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE users SET username=$1 WHERE user_id=$2",
+                live_username, uid
+            )
+        if result == "UPDATE 0":
+            return  # юзера ещё нет в БД — попробуем на следующем апдейте
+        _username_cache[uid] = live_username
+    except Exception:
+        pass
+
 
 class ThrottlingMiddleware(BaseMiddleware):
     """aiogram 2.x process_update middleware — не требует декораторов на хендлерах."""
@@ -116,11 +149,17 @@ class ThrottlingMiddleware(BaseMiddleware):
     async def on_pre_process_update(self, update: types.Update, data: dict):
         # Определяем uid из любого типа апдейта
         if update.message:
-            uid = update.message.from_user.id
+            user = update.message.from_user
         elif update.callback_query:
-            uid = update.callback_query.from_user.id
+            user = update.callback_query.from_user
         else:
             return
+
+        uid = user.id
+
+        # Синхронизируем username на КАЖДОМ апдейте (дёшево: пишем в БД только
+        # при реальном изменении, благодаря кэшу в памяти)
+        await _sync_username(uid, user.username)
 
         now = asyncio.get_event_loop().time()
         last = _throttle_map.get(uid, 0.0)
@@ -402,6 +441,14 @@ async def init_db():
             product_id INTEGER,
             quantity INTEGER
         )
+        """)
+
+        # price_at_order — цена товара НА МОМЕНТ заказа (снимок, не текущая цена).
+        # Нужно для корректной аналитики, если цены в будущем поменяются —
+        # старые заказы должны остаться с исторически верной ценой.
+        await conn.execute("""
+            ALTER TABLE order_items
+            ADD COLUMN IF NOT EXISTS price_at_order REAL DEFAULT 0
         """)
 
         # ================= REFERRALS =================
@@ -3774,11 +3821,8 @@ async def start(message: types.Message, state: FSMContext):
 
         is_new_user = result == "INSERT 0 1"
 
-        # Обновляем username при каждом /start — нужен для /ban и /unban
-        await conn.execute(
-            "UPDATE users SET username=$1 WHERE user_id=$2",
-            message.from_user.username, uid
-        )
+        # username теперь синхронизируется в ThrottlingMiddleware на КАЖДОМ
+        # апдейте (см. _sync_username) — здесь отдельно обновлять не нужно.
 
         user_row = await conn.fetchrow(
             "SELECT language, city FROM users WHERE user_id=$1", uid
@@ -4447,6 +4491,40 @@ async def reserve_stock_for_order(conn, order_id: int, items_str: str, city_key:
     return True
 
 
+async def _record_order_items(conn, order_id: int, items_str: str) -> None:
+    """
+    Пишет нормализованные строки в order_items (order_id, product_id, quantity,
+    price_at_order) — по одной на каждую позицию заказа. Вызывается в той же
+    транзакции, что и создание заказа, чтобы данные никогда не разошлись.
+
+    Раньше товары заказа хранились только как строка "pid:qty,pid:qty" в
+    orders.items и парсились на лету везде, где нужна была разбивка — неудобно
+    для SQL-аналитики (Looker Studio / Metabase). Теперь есть нормальные строки,
+    по которым можно делать обычный GROUP BY product_id без парсинга строк.
+    """
+    parts = []
+    for part in items_str.split(","):
+        if ":" not in part:
+            continue
+        pid_str, qty_str = part.split(":")
+        parts.append((int(pid_str), int(qty_str)))
+
+    if not parts:
+        return
+
+    pids = [p[0] for p in parts]
+    price_rows = await conn.fetch(
+        "SELECT id, price FROM products WHERE id = ANY($1::int[])", pids
+    )
+    price_map = {r["id"]: float(r["price"] or 0) for r in price_rows}
+
+    for pid, qty in parts:
+        await conn.execute("""
+            INSERT INTO order_items (order_id, product_id, quantity, price_at_order)
+            VALUES ($1, $2, $3, $4)
+        """, order_id, pid, qty, price_map.get(pid, 0))
+
+
 async def release_reserved_stock(conn, order_id: int, city_key: str | None = None) -> None:
     """Возвращает зарезервированный stock при отмене заказа."""
     rows = await conn.fetch(
@@ -4529,6 +4607,7 @@ async def confirm_cash(call):
                 ok = await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
                 if not ok:
                     raise Exception("stock_unavailable")
+                await _record_order_items(conn, order_id, items_str)
         except Exception as e:
             if "stock_unavailable" in str(e):
                 await call.answer(await t(uid, "stock_changed_retry"), show_alert=True)
@@ -4600,6 +4679,7 @@ async def _create_pending_order(uid: int, items_str: str, eur_total: float, disc
                 ok = await reserve_stock_for_order(conn, order_id, items_str, resolved_city)
                 if not ok:
                     return None   # stock закончился — caller покажет retry
+                await _record_order_items(conn, order_id, items_str)
 
             await conn.execute("DELETE FROM cart WHERE user_id=$1", uid)
             await conn.execute("UPDATE users SET cart_mode='pickup' WHERE user_id=$1", uid)
@@ -5872,7 +5952,8 @@ async def _build_sales_report(date_from: date, date_to: date) -> str:
             WHERE status = 'confirmed'
               AND DATE(created_at) >= $1
               AND DATE(created_at) <= $2
-        """, date_from, date_to)
+              AND NOT (user_id = ANY($3::bigint[]))
+        """, date_from, date_to, EXCLUDED_FROM_STATS)
 
         if not orders:
             return f"📊 Продажи за {date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}\n\nЗаказов не найдено."
@@ -6338,24 +6419,30 @@ async def stats_cmd(message: types.Message):
         active_7d = await conn.fetchval("""
             SELECT COUNT(DISTINCT user_id) FROM orders
             WHERE created_at >= NOW() - INTERVAL '7 days'
-        """)
+              AND NOT (user_id = ANY($1::bigint[]))
+        """, EXCLUDED_FROM_STATS)
         active_30d = await conn.fetchval("""
             SELECT COUNT(DISTINCT user_id) FROM orders
             WHERE created_at >= NOW() - INTERVAL '30 days'
-        """)
-        pending_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM orders WHERE status='pending'"
-        )
+              AND NOT (user_id = ANY($1::bigint[]))
+        """, EXCLUDED_FROM_STATS)
+        pending_count = await conn.fetchval("""
+            SELECT COUNT(*) FROM orders
+            WHERE status='pending'
+              AND NOT (user_id = ANY($1::bigint[]))
+        """, EXCLUDED_FROM_STATS)
         revenue_month = await conn.fetchval("""
             SELECT COALESCE(SUM(total), 0) FROM orders
             WHERE status='confirmed'
             AND created_at >= DATE_TRUNC('month', NOW())
-        """)
+            AND NOT (user_id = ANY($1::bigint[]))
+        """, EXCLUDED_FROM_STATS)
         total_orders_month = await conn.fetchval("""
             SELECT COUNT(*) FROM orders
             WHERE status='confirmed'
             AND created_at >= DATE_TRUNC('month', NOW())
-        """)
+            AND NOT (user_id = ANY($1::bigint[]))
+        """, EXCLUDED_FROM_STATS)
 
     text = (
         f"📊 Статистика магазина\n\n"
