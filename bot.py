@@ -47,6 +47,7 @@ _CITIES_DEFAULTS: dict[str, dict] = {
     },
 }
 
+
 # ADMIN_IDS пересчитывается при каждом изменении CITIES
 ADMIN_IDS: list[int] = list(SUPER_ADMINS)
 
@@ -1023,8 +1024,8 @@ TEXTS = {
         "banned_message": "🚫 Ваш аккаунт был заблокирован администрацией.",
         "delivery_mode_on": "🚚 Режим доставки",
         "delivery_mode_off": "🏪 Режим самовывоза",
-        "delivery_mode_toggle_on": "✅ Включён режим доставки",
-        "delivery_mode_toggle_off": "✅ Включён режим самовывоза",
+        "delivery_mode_toggle_on": "✅ Включен режим доставки",
+        "delivery_mode_toggle_off": "✅ Включен режим самовывоза",
         "delivery_cart_conflict": "🚚 Очисти корзину, чтобы переключить режим — в ней уже есть товары в другом режиме.",
         "free_delivery_hint": "📦 При заказе от 3 банок доставка бесплатная.",
         "delivery_step_name": "📝 Введи имя и фамилию (как в паспорте):",
@@ -1161,29 +1162,30 @@ TEXTS = {
         "discount_label_wheel": "🎰 Скидка от рулетки",
         "discounts_total_saved": "💸 Всего сэкономлено: {value}€",
         "discount_label_ref_bonus": "🎉 Скидка новичка",
-        "ref_rules": "🎁 Правила:\n• Ты получаешь скидку {inviter}€ после первого заказа приглашённого друга\n• Твой друг получает скидку {new_user}€ на первый заказ",
+        "ref_rules": "🎁 Правила:\n• Ты получаешь скидку {inviter}€ после первого заказа приглашенного друга\n• Твой друг получает скидку {new_user}€ на первый заказ",
         "ref_invited_count": "👥 Приглашено пользователей: {count}",
         "ref_share_button": "📤 Поделиться ссылкой",
         "ref_share_text": "Заходи в наш магазин жидкостей по моей ссылке и получи скидку на первый заказ! 🎁",
         "ref_credited_notify": "🎉 Твой друг сделал первый заказ! Тебе начислена реферальная скидка 2€.",
         "wheel_discount_saved": "🎰 Скидка с колеса удачи не применилась к этому заказу — она сохранена и будет доступна при следующем заказе.",
-        "ref_discount_partial": "💸 Реферальная скидка применена частично: -{used}€. Остаток {left}€ сохранён на следующий заказ.",
+        "ref_discount_partial": "💸 Реферальная скидка применена частично: -{used}€. Остаток {left}€ сохранен на следующий заказ.",
 
         # ── ПАРТНЁРСКАЯ ПРОГРАММА ──
-        "ref_become_partner_hint": "🤝 Хочешь стать партнёром и получать реальные деньги за приглашённых пользователей? Напиши администратору: @{admin}",
-        "partner_btn": "💼 Партнёрка",
-        "partner_title": "💼 Партнёрская программа",
-        "partner_rules": "🎁 Правила:\n• Ты получаешь {reward}€ реальными деньгами за каждого приглашённого пользователя — после того как городской админ подтвердит его первый заказ\n• Приглашённый пользователь получает скидку {new_user}€ на первый заказ",
+        "ref_become_partner_hint": "🤝 Хочешь стать партнером и получать реальные деньги за приглашенных пользователей? Напиши администратору: @{admin}",
+        "partner_btn": "💼 Партнерка",
+        "partner_title": "💼 Партнерская программа",
+        "partner_your_link": "🔗 Твоя партнерская ссылка:",
+        "partner_rules": "🎁 Правила:\n• Ты получаешь {reward}€ за каждого приглашенного пользователя после его первого заказа\n• Приглашенный пользователь получает скидку {new_user}€ на первый заказ",
         "partner_invited_count": "👥 Приглашено пользователей: {count}",
         "partner_balance": "💰 Баланс к выводу: {value}€",
-        "partner_credited_notify": "🎉 Приглашённый тобой пользователь сделал первый заказ! Тебе начислено {value}€ на баланс партнёра.",
+        "partner_credited_notify": "🎉 Приглашенный тобой пользователь сделал первый заказ! Тебе начислено {value}€ на баланс партнера.",
         "partner_withdraw_button": "💸 Вывод",
         "partner_withdraw_title": "💸 Выбери способ вывода:",
         "partner_withdraw_cash": "💵 Наличными",
         "partner_withdraw_card": "💳 На карту",
         "partner_withdraw_usdt": "💲 USDT",
         "partner_withdraw_locked": "❌ Недостаточно средств для этого способа.\nМинимум: {min}€\nУ тебя накоплено: {balance}€",
-        "partner_withdraw_success": "✅ Заявка на вывод {value}€ ({method}) отправлена администратору.\nБаланс обнулён — ожидай выплату.",
+        "partner_withdraw_success": "✅ Заявка на вывод {value}€ ({method}) отправлена администратору.\nБаланс обнулен — ожидай выплату.",
         "partner_method_cash": "Наличные",
         "partner_method_card": "Карта",
         "partner_method_usdt": "USDT",
@@ -1193,7 +1195,7 @@ TEXTS = {
         "stats_top_product": "⭐ Любимый товар: {name} (куплен {count} раз)",
         "stats_top_product_none": "⭐ Любимый товар: пока нет заказов",
         "stats_max_streak": "🔥 Максимальный Buy Streak: {weeks} недель",
-        "stats_spins": "🎰 Прокручено колёс: {count}",
+        "stats_spins": "🎰 Прокручено колес: {count}",
         "stats_invited": "👥 Приглашено пользователей: {count}",
         "stats_total_spent": "💰 Всего потрачено: {value}€",
         "stock_out": "❌ К сожалению, товара {name} больше нет в наличии.\n\nУдалите его из корзины или выберите другой вкус.",
@@ -1205,7 +1207,7 @@ TEXTS = {
         "setstock_usage": "Использование:\n/setstock <elfliq|elfworld> <N[,N,...]> <кол-во>",
         "stock_updated": "✅ Обновлено {count} товар(ов)",
         "promo_activated_discount": "🎉 Промокод активирован!\n\nСкидка -{value}€ добавлена к твоему заказу.",
-        "promo_activated_free_jar": "🎉 Промокод активирован!\n\nТебе начислена бесплатная банка — выбери её в магазине.",
+        "promo_activated_free_jar": "🎉 Промокод активирован!\n\nТебе начислена бесплатная банка — выбери ее в магазине.",
         "promo_not_found": "❌ Промокод не найден или уже использован.",
         "promo_already_have": "⚠️ У тебя уже есть активный промокод.",
         "promo_usage": "Использование: /promo КОД",
@@ -1226,11 +1228,11 @@ TEXTS = {
         "pay_card_uah_screen": "💶 Сумма заказа:\n{eur}€\n\n💱 Курс:\n1 EUR = {rate} UAH\n\n💳 К оплате:\n{uah} UAH\n\n📥 Карта:\n`{card}`\n\nНажмите на номер карты для копирования.",
         "pay_i_paid_btn": "✅ Я оплатил",
         "pay_pending_user": "⏳ Оплата отправлена на проверку.\n\nАдминистратор свяжется с вами после подтверждения.",
-        "rate_unavailable": "⚠️ Не удалось получить курс. Попробуй ещё раз через минуту.",
+        "rate_unavailable": "⚠️ Не удалось получить курс. Попробуй еще раз через минуту.",
         # --- Города ---
         "choose_city": "🏙 Выбери город:",
         "city_delivery_btn": "🚚 Доставка",
-        "city_not_set_reminder": "🏙 Ты ещё не выбрал город.\n\nПожалуйста, выбери город:",
+        "city_not_set_reminder": "🏙 Ты еще не выбрал город.\n\nПожалуйста, выбери город:",
         "city_selected": "✅ Город выбран: {city}",
         "city_delivery_selected": "✅ Выбрана Доставка",
         "profile_city_row": "🏙 Город: {city}",
@@ -1238,7 +1240,7 @@ TEXTS = {
         "profile_city_none": "🏙 Город не выбран",
         "profile_change_city": "🏙 Изменить город",
         "admin_order_city": "🏙 Город: {city}",
-        "admin_confirmed_notify": "✅ Заказ подтверждён\n\n🏙 Город: {city}\n📦 Товары: {items}\n💰 Сумма: {total}€",
+        "admin_confirmed_notify": "✅ Заказ подтвержден\n\n🏙 Город: {city}\n📦 Товары: {items}\n💰 Сумма: {total}€",
         "stock_city_usage": "Использование:\n/addstock <город|all> <elfliq|elfworld> <all|N[,N,...]> <кол-во>\n\nДоступные города: {cities}",
         "stock_city_invalid": "❌ Неверный город. Доступные: {cities}\nИли используйте 'all' для всех городов.",
     },
@@ -1405,7 +1407,8 @@ TEXTS = {
         "ref_become_partner_hint": "🤝 Хочеш стати партнером і отримувати реальні гроші за запрошених користувачів? Напиши адміністратору: @{admin}",
         "partner_btn": "💼 Партнерка",
         "partner_title": "💼 Партнерська програма",
-        "partner_rules": "🎁 Правила:\n• Ти отримуєш {reward}€ реальними грошима за кожного запрошеного користувача — після того як міський адмін підтвердить його перше замовлення\n• Запрошений користувач отримує знижку {new_user}€ на перше замовлення",
+        "partner_your_link": "🔗 Твоє партнерське посилання:",
+        "partner_rules": "🎁 Правила:\n• Ти отримуєш {reward}€ за кожного запрошеного користувача після його першого замовлення\n• Запрошений користувач отримує знижку {new_user}€ на перше замовлення",
         "partner_invited_count": "👥 Запрошено користувачів: {count}",
         "partner_balance": "💰 Баланс до виведення: {value}€",
         "partner_credited_notify": "🎉 Запрошений тобою користувач зробив перше замовлення! Тобі нараховано {value}€ на баланс партнера.",
@@ -1637,7 +1640,8 @@ TEXTS = {
         "ref_become_partner_hint": "🤝 Möchtest du Partner werden und echtes Geld für eingeladene Nutzer verdienen? Schreib dem Administrator: @{admin}",
         "partner_btn": "💼 Partner",
         "partner_title": "💼 Partnerprogramm",
-        "partner_rules": "🎁 Regeln:\n• Du erhältst {reward}€ echtes Geld für jeden eingeladenen Nutzer — nachdem der Stadtadmin dessen erste Bestellung bestätigt hat\n• Der eingeladene Nutzer erhält {new_user}€ Rabatt auf die erste Bestellung",
+        "partner_your_link": "🔗 Dein Partner-Link:",
+        "partner_rules": "🎁 Regeln:\n• Du erhältst {reward}€ für jeden eingeladenen Nutzer nach dessen erster Bestellung\n• Der eingeladene Nutzer erhält {new_user}€ Rabatt auf die erste Bestellung",
         "partner_invited_count": "👥 Eingeladene Nutzer: {count}",
         "partner_balance": "💰 Auszahlbares Guthaben: {value}€",
         "partner_credited_notify": "🎉 Der von dir eingeladene Nutzer hat seine erste Bestellung aufgegeben! Dir wurden {value}€ auf dein Partnerguthaben gutgeschrieben.",
@@ -3106,7 +3110,7 @@ async def profile_partner(call):
 
     text = (
         f"{await t(uid,'partner_title')}\n\n"
-        f"{await t(uid,'ref_your_link')}\n"
+        f"{await t(uid,'partner_your_link')}\n"
         f"{ref_link}\n\n"
         f"{rules}\n\n"
         f"{(await t(uid,'partner_invited_count')).format(count=invited_count)}\n"
