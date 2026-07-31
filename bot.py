@@ -47,7 +47,6 @@ _CITIES_DEFAULTS: dict[str, dict] = {
     },
 }
 
-
 # ADMIN_IDS пересчитывается при каждом изменении CITIES
 ADMIN_IDS: list[int] = list(SUPER_ADMINS)
 
@@ -2429,6 +2428,27 @@ async def set_stock_for_city(conn, product_id: int, city_key: str | None, value:
         """, pool_key, product_id, value)
 
 
+async def get_available_categories(city_key: str | None) -> set[str]:
+    """Категории, в которых есть хотя бы один товар в наличии (с учётом пула города)."""
+    pool_key = get_stock_pool(city_key)
+    async with pool.acquire() as conn:
+        if pool_key == "default":
+            rows = await conn.fetch(
+                "SELECT DISTINCT category FROM products WHERE stock > 0"
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT p.category
+                FROM products p
+                JOIN city_stock cs ON cs.product_id = p.id
+                WHERE cs.city_key = $1 AND cs.stock > 0
+                """,
+                pool_key
+            )
+    return {r["category"] for r in rows}
+
+
 def get_rank(total_items):
     ranks = DISCOUNTS.get("rank", [])
 
@@ -4236,10 +4256,23 @@ async def render_category_selection(target, uid, mode="shop"):
     text = await t(uid, "choose_section")
 
     kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton(await t(uid, "section_elfliq"), callback_data=f"{prefix}elfliq"),
-        InlineKeyboardButton(await t(uid, "section_elfworld"), callback_data=f"{prefix}elfworld"),
-    )
+
+    if mode == "shop":
+        # В магазине показываем только те разделы, где есть товар в наличии
+        city = await get_user_city(uid)
+        available = await get_available_categories(city)
+        section_buttons = []
+        if "elfliq" in available:
+            section_buttons.append(InlineKeyboardButton(await t(uid, "section_elfliq"), callback_data=f"{prefix}elfliq"))
+        if "elfworld" in available:
+            section_buttons.append(InlineKeyboardButton(await t(uid, "section_elfworld"), callback_data=f"{prefix}elfworld"))
+        if section_buttons:
+            kb.add(*section_buttons)
+    else:
+        kb.add(
+            InlineKeyboardButton(await t(uid, "section_elfliq"), callback_data=f"{prefix}elfliq"),
+            InlineKeyboardButton(await t(uid, "section_elfworld"), callback_data=f"{prefix}elfworld"),
+        )
 
     if mode == "shop":
         kb.add(
@@ -4306,23 +4339,24 @@ async def render_category_shop(target, uid, category):
 
     kb = InlineKeyboardMarkup()
 
-    if not products:
+    in_stock_products = [p for p in products if stock_map.get(p["id"], 0) > 0]
+
+    if not in_stock_products:
         text += TEXTS[lang]["section_empty"] + "\n"
 
-    for p in products:
+    for p in in_stock_products:
         pid = p["id"]
         name = p[f"name_{lang}"]
-        stock = stock_map.get(pid, 0)
         heart = "❤️" if pid in fav_set else ""
-        status = "✅" if stock > 0 else "❌"
-        text += f"{name} {status} {heart}\n"
-        if stock > 0:
-            kb.add(InlineKeyboardButton(name, callback_data=f"view_{pid}"))
+        text += f"{name} {heart}\n" if heart else f"{name}\n"
+        kb.add(InlineKeyboardButton(name, callback_data=f"view_{pid}"))
 
     other_category = "elfworld" if category == "elfliq" else "elfliq"
     switch_key = "switch_to_elfworld" if category == "elfliq" else "switch_to_elfliq"
 
-    kb.add(InlineKeyboardButton(TEXTS[lang][switch_key], callback_data=f"shop_cat_{other_category}"))
+    other_available = await get_available_categories(ctx["city"])
+    if other_category in other_available:
+        kb.add(InlineKeyboardButton(TEXTS[lang][switch_key], callback_data=f"shop_cat_{other_category}"))
     kb.add(
         InlineKeyboardButton(TEXTS[lang]["cart"],    callback_data="open_cart"),
         InlineKeyboardButton(TEXTS[lang]["profile"], callback_data="profile")
