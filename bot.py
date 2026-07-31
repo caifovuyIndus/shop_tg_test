@@ -96,7 +96,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ========== КОНСТАНТЫ ==========
-BASE_PRICE: int = 15   # Базовая цена товара в EUR. Менять только здесь.
+BASE_PRICE: int = 13   # Базовая цена товара в EUR. Менять только здесь.
+
+# ========== ПАРТНЁРСКАЯ ПРОГРАММА ==========
+PARTNER_REWARD: float = 5.0              # € партнёру за первый подтверждённый заказ приглашённого
+PARTNER_NEW_USER_BONUS: float = 2.0      # € скидка новому пользователю (тот же размер, что и в обычной рефералке)
+PARTNER_WITHDRAW_MIN_CASH: float = 20.0  # минимум для вывода наличными
+PARTNER_WITHDRAW_MIN_OTHER: float = 50.0 # минимум для вывода на карту / USDT
+
+# Юзернейм, куда направлять пользователей, которые хотят стать партнёром
+# (тот же контакт, что используется в остальном боте для связи с администрацией)
+ADMIN_CONTACT_USERNAME: str = "bizzshop_admin"
 
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
@@ -709,6 +719,31 @@ async def init_db():
             ALTER TABLE users
             ADD COLUMN IF NOT EXISTS ref_discount REAL DEFAULT 0
         """)
+
+        # ========== ПАРТНЁРСКАЯ ПРОГРАММА ==========
+        # is_partner — статус назначается только высшим админом (/addpartner, /removepartner).
+        # partner_balance — накопленные РЕАЛЬНЫЕ деньги (не скидка!) за приглашённых
+        # пользователей, которые партнёр может вывести. В отличие от ref_discount
+        # (скидка в магазине для обычных рефереров), это отдельный денежный баланс.
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS is_partner BOOLEAN DEFAULT false
+        """)
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS partner_balance REAL DEFAULT 0
+        """)
+
+        # История заявок на вывод партнёрских денег (аудит).
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS partner_withdrawals (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            amount REAL,
+            method TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
         
         count = await conn.fetchval("SELECT COUNT(*) FROM products WHERE category='elfliq'")
 
@@ -1133,6 +1168,25 @@ TEXTS = {
         "ref_credited_notify": "🎉 Твой друг сделал первый заказ! Тебе начислена реферальная скидка 2€.",
         "wheel_discount_saved": "🎰 Скидка с колеса удачи не применилась к этому заказу — она сохранена и будет доступна при следующем заказе.",
         "ref_discount_partial": "💸 Реферальная скидка применена частично: -{used}€. Остаток {left}€ сохранён на следующий заказ.",
+
+        # ── ПАРТНЁРСКАЯ ПРОГРАММА ──
+        "ref_become_partner_hint": "🤝 Хочешь стать партнёром и получать реальные деньги за приглашённых пользователей? Напиши администратору: @{admin}",
+        "partner_btn": "💼 Партнёрка",
+        "partner_title": "💼 Партнёрская программа",
+        "partner_rules": "🎁 Правила:\n• Ты получаешь {reward}€ реальными деньгами за каждого приглашённого пользователя — после того как городской админ подтвердит его первый заказ\n• Приглашённый пользователь получает скидку {new_user}€ на первый заказ",
+        "partner_invited_count": "👥 Приглашено пользователей: {count}",
+        "partner_balance": "💰 Баланс к выводу: {value}€",
+        "partner_credited_notify": "🎉 Приглашённый тобой пользователь сделал первый заказ! Тебе начислено {value}€ на баланс партнёра.",
+        "partner_withdraw_button": "💸 Вывод",
+        "partner_withdraw_title": "💸 Выбери способ вывода:",
+        "partner_withdraw_cash": "💵 Наличными",
+        "partner_withdraw_card": "💳 На карту",
+        "partner_withdraw_usdt": "💲 USDT",
+        "partner_withdraw_locked": "❌ Недостаточно средств для этого способа.\nМинимум: {min}€\nУ тебя накоплено: {balance}€",
+        "partner_withdraw_success": "✅ Заявка на вывод {value}€ ({method}) отправлена администратору.\nБаланс обнулён — ожидай выплату.",
+        "partner_method_cash": "Наличные",
+        "partner_method_card": "Карта",
+        "partner_method_usdt": "USDT",
         "stats_total_orders": "🧾 Всего заказов: {count}",
         "stats_first_order": "📅 Дата первого заказа: {date}",
         "stats_rank": "🏆 Текущий ранг: {rank}",
@@ -1346,6 +1400,25 @@ TEXTS = {
         "ref_credited_notify": "🎉 Твій друг зробив перше замовлення! Тобі нараховано реферальну знижку 2€.",
         "wheel_discount_saved": "🎰 Знижка з колеса удачі не застосувалась до цього замовлення — вона збережена і буде доступна при наступному замовленні.",
         "ref_discount_partial": "💸 Реферальна знижка застосована частково: -{used}€. Залишок {left}€ збережено на наступне замовлення.",
+
+        # ── ПАРТНЕРСЬКА ПРОГРАМА ──
+        "ref_become_partner_hint": "🤝 Хочеш стати партнером і отримувати реальні гроші за запрошених користувачів? Напиши адміністратору: @{admin}",
+        "partner_btn": "💼 Партнерка",
+        "partner_title": "💼 Партнерська програма",
+        "partner_rules": "🎁 Правила:\n• Ти отримуєш {reward}€ реальними грошима за кожного запрошеного користувача — після того як міський адмін підтвердить його перше замовлення\n• Запрошений користувач отримує знижку {new_user}€ на перше замовлення",
+        "partner_invited_count": "👥 Запрошено користувачів: {count}",
+        "partner_balance": "💰 Баланс до виведення: {value}€",
+        "partner_credited_notify": "🎉 Запрошений тобою користувач зробив перше замовлення! Тобі нараховано {value}€ на баланс партнера.",
+        "partner_withdraw_button": "💸 Виведення",
+        "partner_withdraw_title": "💸 Обери спосіб виведення:",
+        "partner_withdraw_cash": "💵 Готівкою",
+        "partner_withdraw_card": "💳 На картку",
+        "partner_withdraw_usdt": "💲 USDT",
+        "partner_withdraw_locked": "❌ Недостатньо коштів для цього способу.\nМінімум: {min}€\nУ тебе накопичено: {balance}€",
+        "partner_withdraw_success": "✅ Заявку на виведення {value}€ ({method}) надіслано адміністратору.\nБаланс обнулено — очікуй виплату.",
+        "partner_method_cash": "Готівка",
+        "partner_method_card": "Картка",
+        "partner_method_usdt": "USDT",
         "stats_total_orders": "🧾 Всього замовлень: {count}",
         "stats_first_order": "📅 Дата першого замовлення: {date}",
         "stats_rank": "🏆 Поточний ранг: {rank}",
@@ -1559,6 +1632,25 @@ TEXTS = {
         "ref_credited_notify": "🎉 Dein Freund hat seine erste Bestellung aufgegeben! Du hast einen Empfehlungsrabatt von 2€ erhalten.",
         "wheel_discount_saved": "🎰 Der Glücksrad-Rabatt wurde bei dieser Bestellung nicht angewendet — er bleibt gespeichert und steht bei der nächsten Bestellung zur Verfügung.",
         "ref_discount_partial": "💸 Empfehlungsrabatt teilweise verwendet: -{used}€. Restguthaben {left}€ für die nächste Bestellung gespeichert.",
+
+        # ── PARTNERPROGRAMM ──
+        "ref_become_partner_hint": "🤝 Möchtest du Partner werden und echtes Geld für eingeladene Nutzer verdienen? Schreib dem Administrator: @{admin}",
+        "partner_btn": "💼 Partner",
+        "partner_title": "💼 Partnerprogramm",
+        "partner_rules": "🎁 Regeln:\n• Du erhältst {reward}€ echtes Geld für jeden eingeladenen Nutzer — nachdem der Stadtadmin dessen erste Bestellung bestätigt hat\n• Der eingeladene Nutzer erhält {new_user}€ Rabatt auf die erste Bestellung",
+        "partner_invited_count": "👥 Eingeladene Nutzer: {count}",
+        "partner_balance": "💰 Auszahlbares Guthaben: {value}€",
+        "partner_credited_notify": "🎉 Der von dir eingeladene Nutzer hat seine erste Bestellung aufgegeben! Dir wurden {value}€ auf dein Partnerguthaben gutgeschrieben.",
+        "partner_withdraw_button": "💸 Auszahlung",
+        "partner_withdraw_title": "💸 Wähle eine Auszahlungsmethode:",
+        "partner_withdraw_cash": "💵 Bargeld",
+        "partner_withdraw_card": "💳 Auf Karte",
+        "partner_withdraw_usdt": "💲 USDT",
+        "partner_withdraw_locked": "❌ Nicht genug Guthaben für diese Methode.\nMindestbetrag: {min}€\nDein Guthaben: {balance}€",
+        "partner_withdraw_success": "✅ Auszahlungsantrag über {value}€ ({method}) wurde an den Administrator gesendet.\nGuthaben wurde zurückgesetzt — Auszahlung folgt.",
+        "partner_method_cash": "Bargeld",
+        "partner_method_card": "Karte",
+        "partner_method_usdt": "USDT",
         "stats_total_orders": "🧾 Bestellungen insgesamt: {count}",
         "stats_first_order": "📅 Datum der ersten Bestellung: {date}",
         "stats_rank": "🏆 Aktueller Rang: {rank}",
@@ -1628,42 +1720,40 @@ DISCOUNTS = {
             "key": "bronze",
             "name": {"ru": "🥉 Bronze", "ua": "🥉 Bronze", "de": "🥉 Bronze"},
             "need": 5,
-            "value": 1.0
+            "value": 0.5
         },
         {
             "key": "silver",
             "name": {"ru": "🥈 Silver", "ua": "🥈 Silver", "de": "🥈 Silver"},
             "need": 10,
-            "value": 1.5
+            "value": 1.0
         },
         {
             "key": "gold",
             "name": {"ru": "🥇 Gold", "ua": "🥇 Gold", "de": "🥇 Gold"},
             "need": 20,
-            "value": 2.0
+            "value": 1.5
         },
         {
             "key": "diamond",
             "name": {"ru": "💎 Diamond", "ua": "💎 Diamond", "de": "💎 Diamond"},
             "need": 40,
-            "value": 3.0
+            "value": 2.0
         },
     ],
 
     "wheel": [
-        {"key": "1", "chance": 39, "value": 1.0},
-        {"key": "1.5", "chance": 30, "value": 1.5},
-        {"key": "2", "chance": 20, "value": 2.0},
-        {"key": "3", "chance": 10, "value": 3.0},
-        {"key": "free", "chance": 1, "value": 15.0},
+        {"key": "1", "chance": 54, "value": 1.0},
+        {"key": "1.5", "chance": 25, "value": 1.5},
+        {"key": "2", "chance": 15, "value": 2.0},
+        {"key": "3", "chance": 5, "value": 3.0},
+        {"key": "free", "chance": 1, "value": BASE_PRICE},
     ],
 
     "streak": [
         {"weeks": 1, "value": 1.0},
         {"weeks": 2, "value": 1.5},
         {"weeks": 3, "value": 2.0},
-        {"weeks": 4, "value": 2.5},
-        {"weeks": 5, "value": 3.0},
     ],
 
     "ref": {
@@ -2086,7 +2176,7 @@ async def _effective_days_since(last_date: date, city_key: str | None = None,
     return max(real_days - frozen_days, 0)
 
 def get_streak_discount_value(weeks: int) -> float:
-    """Скидка за стрик (максимум — последний порог в DISCOUNTS['streak'], сейчас 3€ с 5 недель)."""
+    """Скидка за стрик (максимум — последний порог в DISCOUNTS['streak'], сейчас 2€ с 3 недель)."""
     value = 0
     for s in DISCOUNTS["streak"]:
         if weeks >= s["weeks"]:
@@ -2447,7 +2537,7 @@ async def render_profile(target):
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT total_items, total_orders, total_saved,
-                   promo_discount, promo_code, promo_type, city
+                   promo_discount, promo_code, promo_type, city, is_partner
             FROM users WHERE user_id=$1
         """, uid)
 
@@ -2458,6 +2548,7 @@ async def render_profile(target):
     promo_code = row["promo_code"]
     promo_type = row["promo_type"]
     user_city = row["city"]
+    is_partner = row["is_partner"] or False
 
     lang = await get_lang(uid)
     rank = get_rank(items)
@@ -2503,7 +2594,10 @@ async def render_profile(target):
     )
     kb.add(
         InlineKeyboardButton(await t(uid,"discounts"), callback_data="profile_discounts"),
-        InlineKeyboardButton(await t(uid,"ref"), callback_data="profile_ref"),
+        InlineKeyboardButton(
+            await t(uid, "partner_btn") if is_partner else await t(uid, "ref"),
+            callback_data="profile_partner" if is_partner else "profile_ref"
+        ),
     )
     kb.add(
         InlineKeyboardButton(await t(uid,"favorites"), callback_data="profile_fav"),
@@ -2952,13 +3046,18 @@ async def profile_ref(call):
         new_user=DISCOUNTS["ref"]["new_user"]
     )
 
+    become_partner_hint = (await t(uid, "ref_become_partner_hint")).format(
+        admin=ADMIN_CONTACT_USERNAME
+    )
+
     text = (
         f"{await t(uid,'ref_title')}\n\n"
         f"{await t(uid,'ref_your_link')}\n"
         f"{ref_link}\n\n"
         f"{rules}\n\n"
         f"{(await t(uid,'ref_invited_count')).format(count=invited_count)}\n"
-        f"{(await t(uid,'ref_earned')).format(value=round(ref_discount_balance, 2))}"
+        f"{(await t(uid,'ref_earned')).format(value=round(ref_discount_balance, 2))}\n\n"
+        f"{become_partner_hint}"
     )
 
     share_text = await t(uid, "ref_share_text")
@@ -2972,6 +3071,172 @@ async def profile_ref(call):
     )
 
     await render(call, text, kb)
+
+
+@dp.callback_query_handler(lambda c: c.data == "profile_partner")
+async def profile_partner(call):
+    """Аналог profile_ref, но для партнёров: денежный баланс + вывод вместо скидки."""
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT is_partner, partner_balance FROM users WHERE user_id=$1", uid
+        )
+        if not row or not row["is_partner"]:
+            # Статус сняли, а пользователь ещё смотрит на старую клавиатуру — просто уводим в профиль
+            await profile_cb(call)
+            return
+
+        invited_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1", uid
+        )
+
+    balance = row["partner_balance"] or 0
+
+    username = await get_bot_username()
+    ref_link = f"https://t.me/{username}?start=ref_{uid}"
+
+    rules = (await t(uid, "partner_rules")).format(
+        reward=PARTNER_REWARD,
+        new_user=PARTNER_NEW_USER_BONUS
+    )
+
+    text = (
+        f"{await t(uid,'partner_title')}\n\n"
+        f"{await t(uid,'ref_your_link')}\n"
+        f"{ref_link}\n\n"
+        f"{rules}\n\n"
+        f"{(await t(uid,'partner_invited_count')).format(count=invited_count)}\n"
+        f"{(await t(uid,'partner_balance')).format(value=round(balance, 2))}"
+    )
+
+    share_text = await t(uid, "ref_share_text")
+    share_url = f"https://t.me/share/url?url={quote(ref_link)}&text={quote(share_text)}"
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "ref_share_button"), url=share_url))
+    kb.add(
+        InlineKeyboardButton(await t(uid,"partner_withdraw_button"), callback_data="partner_withdraw"),
+        InlineKeyboardButton(await t(uid,"back"), callback_data="profile")
+    )
+
+    await render(call, text, kb)
+
+
+@dp.callback_query_handler(lambda c: c.data == "partner_withdraw")
+async def partner_withdraw_menu(call: types.CallbackQuery):
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT is_partner, partner_balance FROM users WHERE user_id=$1", uid
+        )
+
+    if not row or not row["is_partner"]:
+        await profile_cb(call)
+        return
+
+    balance = row["partner_balance"] or 0
+
+    # Замочек 🔒 на кнопке, если баланса не хватает для этого способа —
+    # визуальная подсказка ДО нажатия (сама кнопка всё равно тапабельна,
+    # Telegram не умеет по-настоящему отключать inline-кнопки).
+    cash_label = await t(uid, "partner_withdraw_cash")
+    card_label = await t(uid, "partner_withdraw_card")
+    usdt_label = await t(uid, "partner_withdraw_usdt")
+
+    if balance < PARTNER_WITHDRAW_MIN_CASH:
+        cash_label += " 🔒"
+    if balance < PARTNER_WITHDRAW_MIN_OTHER:
+        card_label += " 🔒"
+        usdt_label += " 🔒"
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(cash_label, callback_data="partner_withdraw_do_cash"))
+    kb.add(InlineKeyboardButton(card_label, callback_data="partner_withdraw_do_card"))
+    kb.add(InlineKeyboardButton(usdt_label, callback_data="partner_withdraw_do_usdt"))
+    kb.add(InlineKeyboardButton(await t(uid,"back"), callback_data="profile_partner"))
+
+    text = (
+        f"{await t(uid,'partner_withdraw_title')}\n\n"
+        f"{(await t(uid,'partner_balance')).format(value=round(balance, 2))}"
+    )
+    await render(call, text, kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("partner_withdraw_do_"))
+async def partner_withdraw_do(call: types.CallbackQuery):
+    if not await check_not_banned(call):
+        return
+
+    uid = call.from_user.id
+    method = call.data.replace("partner_withdraw_do_", "")  # cash | card | usdt
+
+    min_required = PARTNER_WITHDRAW_MIN_CASH if method == "cash" else PARTNER_WITHDRAW_MIN_OTHER
+
+    async with pool.acquire() as conn:
+        # Атомарно захватываем баланс ДО обнуления через CTE — защита от повторных/
+        # двойных тапов (второй раз баланс уже будет 0, апдейт не пройдёт условие).
+        row = await conn.fetchrow("""
+            WITH captured AS (
+                SELECT user_id, partner_balance, username
+                FROM users
+                WHERE user_id=$1 AND partner_balance >= $2
+                FOR UPDATE
+            )
+            UPDATE users
+            SET partner_balance = 0
+            FROM captured
+            WHERE users.user_id = captured.user_id
+            RETURNING captured.partner_balance AS withdrawn_amount, captured.username AS username
+        """, uid, min_required)
+
+        if not row:
+            current = await conn.fetchval(
+                "SELECT partner_balance FROM users WHERE user_id=$1", uid
+            ) or 0
+            msg = (await t(uid, "partner_withdraw_locked")).format(
+                min=min_required, balance=round(current, 2)
+            )
+            await call.answer(msg, show_alert=True)
+            return
+
+        withdrawn_amount = row["withdrawn_amount"] or 0
+        username = row["username"]
+
+        await conn.execute(
+            "INSERT INTO partner_withdrawals (user_id, amount, method) VALUES ($1, $2, $3)",
+            uid, withdrawn_amount, method
+        )
+
+    method_label = await t(uid, f"partner_method_{method}")
+
+    await call.answer()
+    text = (await t(uid, "partner_withdraw_success")).format(
+        value=round(withdrawn_amount, 2), method=method_label
+    )
+    await render(call, text, InlineKeyboardMarkup().add(
+        InlineKeyboardButton(await t(uid,"back"), callback_data="profile_partner")
+    ))
+
+    buyer_label = f"@{username}" if username else f"<code>{uid}</code>"
+    admin_notify = (
+        f"💸 Новая заявка на вывод\n\n"
+        f"Партнер:\n{buyer_label}\n\n"
+        f"Сумма:\n{round(withdrawn_amount, 2)}€\n\n"
+        f"Способ:\n{method_label}"
+    )
+    for super_id in SUPER_ADMINS:
+        try:
+            await bot.send_message(super_id, admin_notify, parse_mode="HTML")
+        except Exception:
+            pass
 
 # ========== СТАТИСТИКА ПРОФИЛЯ ==========
 
@@ -4561,7 +4826,7 @@ async def confirm_cash(call):
         return
 
     uid = call.from_user.id
-    username = call.from_user.username or "нет username"
+    username = call.from_user.username or str(uid)
 
     # Предварительная проверка (без блокировки — для отображения пользователю)
     problems = await check_cart_stock(uid)
@@ -4704,11 +4969,17 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
     resolved_city = get_order_city(city_key)
     city_name = CITIES[resolved_city]["name"]
 
+    # username параметр может быть: реальным юзернеймом, str(uid) (fallback без юзернейма
+    # в usdt/card потоках), или числовой строкой из кассового потока (после фикса).
+    # Нормализуем в одно место: если юзернейма нет — показываем tap-to-copy ID.
+    has_username = bool(username) and not str(username).isdigit()
+    buyer_label = f"@{username}" if has_username else f"<code>{uid}</code>"
+
     order_text = (
         f"🏪 Самовывоз | 🏙 {city_name}\n"
         f"{text_admin}\n"
         f"ID: {order_id}\n"
-        f"User: @{username}\n"
+        f"User: {buyer_label}\n"
         f"{payment_line}"
     )
     kb = InlineKeyboardMarkup()
@@ -4725,7 +4996,7 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
     failed_admins = []
     for admin in recipients:
         try:
-            sent = await bot.send_message(admin, order_text, reply_markup=kb)
+            sent = await bot.send_message(admin, order_text, reply_markup=kb, parse_mode="HTML")
             msg_ids.append(f"{admin}:{sent.message_id}")
         except Exception as e:
             failed_admins.append(str(admin))
@@ -4763,8 +5034,6 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
     # Определяем способ оплаты из payment_line (первая строка)
     payment_label = payment_line.split("\n")[0] if payment_line else "—"
 
-    buyer_label = f"@{username}" if username and not username.isdigit() else f"id{uid}"
-
     # Сумма из payment_line (строка ИТОГО)
     total_line = next((l for l in payment_line.split("\n") if "ИТОГО" in l), "")
     total_str = total_line.replace("ИТОГО:", "").replace("ИТОГО", "").strip() if total_line else "—"
@@ -4785,7 +5054,7 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
     super_msg_ids = []
     for super_id in SUPER_ADMINS:
         try:
-            sent = await bot.send_message(super_id, super_notify)
+            sent = await bot.send_message(super_id, super_notify, parse_mode="HTML")
             super_msg_ids.append(f"{super_id}:{sent.message_id}")
         except Exception:
             pass
@@ -5112,7 +5381,7 @@ async def admin_confirm(call):
             order_city
         )
 
-        #    пользователя — начисляем скидку пригласившему ──
+        #    пользователя — начисляем награду пригласившему (партнёр/обычный реферал) ──
         if is_first_order:
             ref_row = await conn.fetchrow("""
                 SELECT referrer_id FROM referrals
@@ -5125,18 +5394,36 @@ async def admin_confirm(call):
                 await conn.execute(
                     "UPDATE referrals SET activated=1 WHERE new_user_id=$1", user_id
                 )
-                # Начисляем 2€ в накопленный пул ref_discount (не обнуляется!)
-                await conn.execute(
-                    "UPDATE users SET referrals = referrals + 1, ref_discount = ref_discount + 2 WHERE user_id=$1",
-                    inviter_id
+
+                inviter_is_partner = await conn.fetchval(
+                    "SELECT is_partner FROM users WHERE user_id=$1", inviter_id
                 )
 
-                try:
-                    await bot.send_message(
-                        inviter_id, await t(inviter_id, "ref_credited_notify")
+                if inviter_is_partner:
+                    # Партнёр — реальные деньги на баланс для вывода, НЕ скидка в магазине
+                    await conn.execute(
+                        "UPDATE users SET referrals = referrals + 1, partner_balance = partner_balance + $1 WHERE user_id=$2",
+                        PARTNER_REWARD, inviter_id
                     )
-                except Exception as _e:
-                    logger.warning("ref_credited_notify: не удалось уведомить inviter %s: %s", inviter_id, _e)
+                    try:
+                        await bot.send_message(
+                            inviter_id,
+                            (await t(inviter_id, "partner_credited_notify")).format(value=PARTNER_REWARD)
+                        )
+                    except Exception as _e:
+                        logger.warning("partner_credited_notify: не удалось уведомить partner %s: %s", inviter_id, _e)
+                else:
+                    # Обычный реферал — накопленная скидка в магазине (не обнуляется!)
+                    await conn.execute(
+                        "UPDATE users SET referrals = referrals + 1, ref_discount = ref_discount + $1 WHERE user_id=$2",
+                        DISCOUNTS["ref"]["inviter"], inviter_id
+                    )
+                    try:
+                        await bot.send_message(
+                            inviter_id, await t(inviter_id, "ref_credited_notify")
+                        )
+                    except Exception as _e:
+                        logger.warning("ref_credited_notify: не удалось уведомить inviter %s: %s", inviter_id, _e)
 
         #    Вычисляем, какие одноразовые скидки реально применились к этому заказу ──
         total_items_in_order = sum(
@@ -5744,6 +6031,161 @@ async def endchat_cmd(message: types.Message):
     await message.answer(f"✅ Чат с ID {target_uid} завершён.")
 
 
+# ========== ПАРТНЁРСКАЯ ПРОГРАММА: НАЗНАЧЕНИЕ / СНЯТИЕ ==========
+
+async def _partner_preview_text(target_uid: int) -> str:
+    """Карточка пользователя для превью перед назначением/снятием статуса партнёра."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT username, city, is_partner, partner_balance, total_items, total_orders
+            FROM users WHERE user_id=$1
+        """, target_uid)
+
+    if not row:
+        return None
+
+    uname = row["username"]
+    user_label = f"@{uname}" if uname else f"id{target_uid}"
+    city_name = CITIES.get(row["city"] or "", {}).get("name", row["city"] or "—")
+    status = "✅ Да" if row["is_partner"] else "❌ Нет"
+
+    return (
+        f"👤 {user_label} (ID: {target_uid})\n"
+        f"Город: {city_name}\n"
+        f"Заказов: {row['total_orders'] or 0} | Товаров куплено: {row['total_items'] or 0}\n"
+        f"Партнёр сейчас: {status}\n"
+        f"Баланс партнёра: {row['partner_balance'] or 0}€"
+    )
+
+
+@dp.message_handler(commands=["addpartner"])
+async def addpartner_cmd(message: types.Message):
+    """/addpartner <@username|id> — назначить партнёра (только super_admin, с подтверждением)."""
+    if not is_super_admin(message.from_user.id):
+        return
+
+    arg = message.get_args().strip()
+    if not arg:
+        await message.answer("Использование: /addpartner <@username|id>")
+        return
+
+    target_uid = await _resolve_user(arg)
+    if not target_uid:
+        await message.answer("❌ Пользователь не найден. Он должен хотя бы раз запустить бота.")
+        return
+
+    preview = await _partner_preview_text(target_uid)
+
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Назначить партнёром", callback_data=f"partner_add_confirm_{target_uid}"),
+        InlineKeyboardButton("❌ Отмена", callback_data="partner_admin_cancel"),
+    )
+    await message.answer(
+        f"Проверь, тот ли это пользователь:\n\n{preview}\n\n"
+        f"Назначить его партнёром?",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("partner_add_confirm_"))
+async def partner_add_confirm(call: types.CallbackQuery):
+    if not is_super_admin(call.from_user.id):
+        return
+
+    target_uid = int(call.data.replace("partner_add_confirm_", ""))
+
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE users SET is_partner=true WHERE user_id=$1", target_uid
+        )
+
+    if result == "UPDATE 0":
+        await call.message.edit_text("❌ Пользователь не найден (возможно, был удалён).")
+        return
+
+    await call.message.edit_text(f"✅ Пользователь ID {target_uid} назначен партнёром.")
+
+    try:
+        lang = await get_lang(target_uid)
+        notify = {
+            "ru": "🎉 Поздравляем! Теперь ты партнёр магазина. Загляни в профиль — там появилась вкладка «Партнёрка».",
+            "ua": "🎉 Вітаємо! Тепер ти партнер магазину. Загляни в профіль — там з'явилась вкладка «Партнерка».",
+            "de": "🎉 Glückwunsch! Du bist jetzt Partner des Shops. Schau in dein Profil — dort ist jetzt der Tab „Partner“.",
+        }.get(lang, "🎉 Поздравляем! Теперь ты партнёр магазина.")
+        await bot.send_message(target_uid, notify)
+    except Exception:
+        pass
+
+
+@dp.message_handler(commands=["removepartner"])
+async def removepartner_cmd(message: types.Message):
+    """/removepartner <@username|id> — снять статус партнёра (только super_admin, с подтверждением)."""
+    if not is_super_admin(message.from_user.id):
+        return
+
+    arg = message.get_args().strip()
+    if not arg:
+        await message.answer("Использование: /removepartner <@username|id>")
+        return
+
+    target_uid = await _resolve_user(arg)
+    if not target_uid:
+        await message.answer("❌ Пользователь не найден.")
+        return
+
+    preview = await _partner_preview_text(target_uid)
+
+    kb = InlineKeyboardMarkup()
+    kb.add(
+        InlineKeyboardButton("✅ Снять статус партнёра", callback_data=f"partner_remove_confirm_{target_uid}"),
+        InlineKeyboardButton("❌ Отмена", callback_data="partner_admin_cancel"),
+    )
+    await message.answer(
+        f"Проверь, тот ли это пользователь:\n\n{preview}\n\n"
+        f"⚠️ Накопленный баланс партнёра НЕ будет обнулён — он сохранится "
+        f"на случай, если статус вернут позже. Снять статус?",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("partner_remove_confirm_"))
+async def partner_remove_confirm(call: types.CallbackQuery):
+    if not is_super_admin(call.from_user.id):
+        return
+
+    target_uid = int(call.data.replace("partner_remove_confirm_", ""))
+
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE users SET is_partner=false WHERE user_id=$1", target_uid
+        )
+
+    if result == "UPDATE 0":
+        await call.message.edit_text("❌ Пользователь не найден.")
+        return
+
+    await call.message.edit_text(f"✅ С пользователя ID {target_uid} снят статус партнёра.")
+
+    try:
+        lang = await get_lang(target_uid)
+        notify = {
+            "ru": "Твой партнёрский статус в магазине снят администрацией.",
+            "ua": "Твій партнерський статус у магазині знято адміністрацією.",
+            "de": "Dein Partnerstatus im Shop wurde von der Administration entfernt.",
+        }.get(lang, "Твой партнёрский статус снят администрацией.")
+        await bot.send_message(target_uid, notify)
+    except Exception:
+        pass
+
+
+@dp.callback_query_handler(lambda c: c.data == "partner_admin_cancel")
+async def partner_admin_cancel(call: types.CallbackQuery):
+    if not is_super_admin(call.from_user.id):
+        return
+    await call.message.edit_text("Отменено, статус не изменён.")
+
+
 @dp.message_handler(commands=["ban"])
 async def ban_cmd(message: types.Message):
     # /ban @username  или  /ban username  или  /ban user_id
@@ -5939,12 +6381,21 @@ def _parse_items_str(items_str: str) -> list[tuple[int, int]]:
     return result
 
 
-async def _build_sales_report(date_from: date, date_to: date) -> str:
+async def _build_sales_report(date_from: date, date_to: date, city_key: str | None = None) -> str:
     """
     Считает продажи за период [date_from, date_to] включительно.
     Учитывает только confirmed-заказы (не отменённые и не pending).
     Бесплатные банки (gift_requests) не учитываются — они не проходят через orders.
+    city_key: если указан — только этот город; если None — все города вместе.
     """
+    date_label = (
+        date_from.strftime("%d.%m")
+        if date_from == date_to
+        else f"{date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}"
+    )
+    scope_label = f" — {CITIES[city_key]['name']}" if city_key else ""
+    header = f"📊 Продажи за {date_label}{scope_label}\n"
+
     async with pool.acquire() as conn:
         orders = await conn.fetch("""
             SELECT items, total, discount
@@ -5953,10 +6404,11 @@ async def _build_sales_report(date_from: date, date_to: date) -> str:
               AND DATE(created_at) >= $1
               AND DATE(created_at) <= $2
               AND NOT (user_id = ANY($3::bigint[]))
-        """, date_from, date_to, EXCLUDED_FROM_STATS)
+              AND ($4::text IS NULL OR city_key = $4)
+        """, date_from, date_to, EXCLUDED_FROM_STATS, city_key)
 
         if not orders:
-            return f"📊 Продажи за {date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}\n\nЗаказов не найдено."
+            return f"{header}\nЗаказов не найдено."
 
         # Собираем агрегацию по product_id
         sales: dict[int, int] = {}  # pid → total_qty
@@ -5969,7 +6421,7 @@ async def _build_sales_report(date_from: date, date_to: date) -> str:
                 sales[pid] = sales.get(pid, 0) + qty
 
         if not sales:
-            return f"📊 Продажи за {date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}\n\nДанных нет."
+            return f"{header}\nДанных нет."
 
         # Загружаем данные о товарах одним запросом
         pids = list(sales.keys())
@@ -5997,12 +6449,7 @@ async def _build_sales_report(date_from: date, date_to: date) -> str:
             total_jars += qty
 
     # Формируем отчёт
-    date_label = (
-        date_from.strftime("%d.%m")
-        if date_from == date_to
-        else f"{date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}"
-    )
-    lines = [f"📊 Продажи за {date_label}\n"]
+    lines = [header]
 
     for cat_key, cat_label in [("elfliq", "🧪 ELFLIQ"), ("elfworld", "🌍 ELFWORLD")]:
         items_in_cat = by_category.get(cat_key, [])
@@ -6019,23 +6466,54 @@ async def _build_sales_report(date_from: date, date_to: date) -> str:
     return "\n".join(lines)
 
 
+async def _build_sales_report_multi_city(date_from: date, date_to: date) -> str:
+    """Отчёт по каждому городу отдельно + общая статистика по всем городам вместе."""
+    date_label = (
+        date_from.strftime("%d.%m")
+        if date_from == date_to
+        else f"{date_from.strftime('%d.%m')}–{date_to.strftime('%d.%m.%Y')}"
+    )
+    parts = []
+    for city_key in CITIES:
+        city_report = await _build_sales_report(date_from, date_to, city_key)
+        parts.append(city_report)
+
+    combined = await _build_sales_report(date_from, date_to, city_key=None)
+    combined = combined.replace(
+        f"📊 Продажи за {date_label}\n",
+        f"📈 ОБЩАЯ СТАТИСТИКА (все города) — {date_label}\n",
+        1
+    )
+    parts.append(combined)
+
+    return "\n\n".join(parts)
+
+
 @dp.message_handler(commands=["sales"])
 async def sales_cmd(message: types.Message, state: FSMContext):
     if not is_super_admin(message.from_user.id):
         return
 
-    today = date.today()
-    yesterday = today - timedelta(days=1)
+    args = message.get_args().strip().lower()
+    if args and args not in CITIES:
+        await message.answer(f"❌ Неверный город. Доступные: {_stock_city_list()}")
+        return
+
+    await state.update_data(sales_city=args or None)
+
+    # Кодируем город прямо в callback_data (или "all", если город не указан)
+    city_suffix = args if args else "all"
 
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("📅 Сегодня",       callback_data="sales_today"),
-        InlineKeyboardButton("📅 Вчера",          callback_data="sales_yesterday"),
-        InlineKeyboardButton("📅 7 дней",         callback_data="sales_7d"),
-        InlineKeyboardButton("📅 30 дней",        callback_data="sales_30d"),
-        InlineKeyboardButton("✏️ Произвольный период", callback_data="sales_custom"),
+        InlineKeyboardButton("📅 Сегодня",       callback_data=f"sales_today_{city_suffix}"),
+        InlineKeyboardButton("📅 Вчера",          callback_data=f"sales_yesterday_{city_suffix}"),
+        InlineKeyboardButton("📅 7 дней",         callback_data=f"sales_7d_{city_suffix}"),
+        InlineKeyboardButton("📅 30 дней",        callback_data=f"sales_30d_{city_suffix}"),
+        InlineKeyboardButton("✏️ Произвольный период", callback_data=f"sales_custom_{city_suffix}"),
     )
-    await message.answer("📊 Выберите период статистики:", reply_markup=kb)
+    scope_note = f" ({CITIES[args]['name']})" if args else " (все города)"
+    await message.answer(f"📊 Выберите период статистики{scope_note}:", reply_markup=kb)
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("sales_"), state="*")
@@ -6046,24 +6524,35 @@ async def sales_period(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     today = date.today()
 
-    if call.data == "sales_today":
-        report = await _build_sales_report(today, today)
+    # callback_data вида "sales_today_munich" или "sales_today_all"
+    body = call.data[len("sales_"):]
+    period, _, city_suffix = body.rpartition("_")
+    city_key = None if city_suffix == "all" else city_suffix
+
+    async def _report(date_from: date, date_to: date) -> str:
+        if city_key:
+            return await _build_sales_report(date_from, date_to, city_key)
+        return await _build_sales_report_multi_city(date_from, date_to)
+
+    if period == "today":
+        report = await _report(today, today)
         await call.message.edit_text(report, reply_markup=None)
 
-    elif call.data == "sales_yesterday":
+    elif period == "yesterday":
         yesterday = today - timedelta(days=1)
-        report = await _build_sales_report(yesterday, yesterday)
+        report = await _report(yesterday, yesterday)
         await call.message.edit_text(report, reply_markup=None)
 
-    elif call.data == "sales_7d":
-        report = await _build_sales_report(today - timedelta(days=6), today)
+    elif period == "7d":
+        report = await _report(today - timedelta(days=6), today)
         await call.message.edit_text(report, reply_markup=None)
 
-    elif call.data == "sales_30d":
-        report = await _build_sales_report(today - timedelta(days=29), today)
+    elif period == "30d":
+        report = await _report(today - timedelta(days=29), today)
         await call.message.edit_text(report, reply_markup=None)
 
-    elif call.data == "sales_custom":
+    elif period == "custom":
+        await state.update_data(sales_city=city_key)
         await SalesState.waiting_date_range.set()
         await call.message.edit_text(
             "✏️ Введите диапазон дат в формате:\n<code>ДД.ММ.ГГГГ-ДД.ММ.ГГГГ</code>\n\nНапример: <code>01.07.2025-10.07.2025</code>",
@@ -6097,8 +6586,14 @@ async def sales_custom_dates(message: types.Message, state: FSMContext):
     if date_from > date_to:
         date_from, date_to = date_to, date_from
 
+    data = await state.get_data()
+    city_key = data.get("sales_city")
     await state.finish()
-    report = await _build_sales_report(date_from, date_to)
+
+    if city_key:
+        report = await _build_sales_report(date_from, date_to, city_key)
+    else:
+        report = await _build_sales_report_multi_city(date_from, date_to)
     await message.answer(report)
 
 
@@ -6324,7 +6819,7 @@ async def order_cmd(message: types.Message):
         uname = await conn.fetchval(
             "SELECT username FROM users WHERE user_id=$1", order["user_id"]
         )
-    user_label = f"@{uname}" if uname else f"id{order['user_id']}"
+    user_label = f"@{uname}" if uname else f"<code>{order['user_id']}</code>"
 
     lines = [
         f"📦 Заказ #{order_id}",
@@ -6349,7 +6844,7 @@ async def order_cmd(message: types.Message):
         name = prod_map.get(int(pid_s), f"#{pid_s}")
         lines.append(f"  • {name} x{qty_s}")
 
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 # ── /cancelorder ──────────────────────────────────────────────────────────────
@@ -6408,52 +6903,94 @@ async def cancelorder_cmd(message: types.Message):
 
 # ── /stats ────────────────────────────────────────────────────────────────────
 
-@dp.message_handler(commands=["stats"])
-async def stats_cmd(message: types.Message):
-    """Краткая сводка по магазину (только super_admin)."""
-    if not is_super_admin(message.from_user.id):
-        return
-
+async def _compute_stats(city_key: str | None) -> dict:
+    """Считает сводку по магазину. city_key=None → по всем городам вместе."""
     async with pool.acquire() as conn:
-        total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+        total_users = await conn.fetchval("""
+            SELECT COUNT(*) FROM users WHERE ($1::text IS NULL OR city=$1)
+        """, city_key)
         active_7d = await conn.fetchval("""
             SELECT COUNT(DISTINCT user_id) FROM orders
             WHERE created_at >= NOW() - INTERVAL '7 days'
               AND NOT (user_id = ANY($1::bigint[]))
-        """, EXCLUDED_FROM_STATS)
+              AND ($2::text IS NULL OR city_key=$2)
+        """, EXCLUDED_FROM_STATS, city_key)
         active_30d = await conn.fetchval("""
             SELECT COUNT(DISTINCT user_id) FROM orders
             WHERE created_at >= NOW() - INTERVAL '30 days'
               AND NOT (user_id = ANY($1::bigint[]))
-        """, EXCLUDED_FROM_STATS)
+              AND ($2::text IS NULL OR city_key=$2)
+        """, EXCLUDED_FROM_STATS, city_key)
         pending_count = await conn.fetchval("""
             SELECT COUNT(*) FROM orders
             WHERE status='pending'
               AND NOT (user_id = ANY($1::bigint[]))
-        """, EXCLUDED_FROM_STATS)
+              AND ($2::text IS NULL OR city_key=$2)
+        """, EXCLUDED_FROM_STATS, city_key)
         revenue_month = await conn.fetchval("""
             SELECT COALESCE(SUM(total), 0) FROM orders
             WHERE status='confirmed'
-            AND created_at >= DATE_TRUNC('month', NOW())
-            AND NOT (user_id = ANY($1::bigint[]))
-        """, EXCLUDED_FROM_STATS)
+              AND created_at >= DATE_TRUNC('month', NOW())
+              AND NOT (user_id = ANY($1::bigint[]))
+              AND ($2::text IS NULL OR city_key=$2)
+        """, EXCLUDED_FROM_STATS, city_key)
         total_orders_month = await conn.fetchval("""
             SELECT COUNT(*) FROM orders
             WHERE status='confirmed'
-            AND created_at >= DATE_TRUNC('month', NOW())
-            AND NOT (user_id = ANY($1::bigint[]))
-        """, EXCLUDED_FROM_STATS)
+              AND created_at >= DATE_TRUNC('month', NOW())
+              AND NOT (user_id = ANY($1::bigint[]))
+              AND ($2::text IS NULL OR city_key=$2)
+        """, EXCLUDED_FROM_STATS, city_key)
 
-    text = (
-        f"📊 Статистика магазина\n\n"
-        f"👥 Пользователей всего: {total_users}\n"
-        f"🔥 Активных за 7 дней: {active_7d}\n"
-        f"📅 Активных за 30 дней: {active_30d}\n\n"
-        f"⏳ Ожидают подтверждения: {pending_count}\n\n"
-        f"💰 Выручка за текущий месяц: {revenue_month:.2f}€\n"
-        f"📦 Заказов за текущий месяц: {total_orders_month}"
+    return {
+        "total_users": total_users,
+        "active_7d": active_7d,
+        "active_30d": active_30d,
+        "pending_count": pending_count,
+        "revenue_month": revenue_month,
+        "total_orders_month": total_orders_month,
+    }
+
+
+def _format_stats_block(stats: dict, title: str) -> str:
+    return (
+        f"{title}\n\n"
+        f"👥 Пользователей всего: {stats['total_users']}\n"
+        f"🔥 Активных за 7 дней: {stats['active_7d']}\n"
+        f"📅 Активных за 30 дней: {stats['active_30d']}\n\n"
+        f"⏳ Ожидают подтверждения: {stats['pending_count']}\n\n"
+        f"💰 Выручка за текущий месяц: {stats['revenue_month']:.2f}€\n"
+        f"📦 Заказов за текущий месяц: {stats['total_orders_month']}"
     )
-    await message.answer(text)
+
+
+@dp.message_handler(commands=["stats"])
+async def stats_cmd(message: types.Message):
+    """Краткая сводка по магазину (только super_admin). /stats <city> — только этот город."""
+    if not is_super_admin(message.from_user.id):
+        return
+
+    args = message.get_args().strip().lower()
+    if args and args not in CITIES:
+        await message.answer(f"❌ Неверный город. Доступные: {_stock_city_list()}")
+        return
+
+    if args:
+        stats = await _compute_stats(args)
+        text = _format_stats_block(stats, f"📊 Статистика — {CITIES[args]['name']}")
+        await message.answer(text)
+        return
+
+    # Город не указан — по каждому городу отдельно + общая
+    parts = []
+    for city_key, cfg in CITIES.items():
+        stats = await _compute_stats(city_key)
+        parts.append(_format_stats_block(stats, f"🏙 {cfg['name']}"))
+
+    combined = await _compute_stats(None)
+    parts.append(_format_stats_block(combined, "📈 ОБЩАЯ СТАТИСТИКА (все города)"))
+
+    await message.answer("\n\n".join(parts))
 
 
 # ── /user ─────────────────────────────────────────────────────────────────────
@@ -6592,13 +7129,19 @@ async def user_cmd(message: types.Message):
 
     gift_pending_line = f"\n🎁 Ожидает выдачи банки: {pending_gift}" if pending_gift else ""
 
+    is_partner = row.get("is_partner") or False
+    partner_line = f"Партнер: {'Да' if is_partner else 'Нет'}"
+    if is_partner:
+        partner_line += f" (баланс к выводу: {row.get('partner_balance', 0) or 0:.2f}€)"
+
     text = (
         f"👤 Пользователь\n\n"
         f"ID: {uid}\n"
         f"Username: @{row['username'] or '—'}\n"
         f"Язык: {row.get('language', '—')}\n"
         f"Город: {city_name}\n"
-        f"Заблокирован: {'да' if row.get('banned') else 'нет'}\n\n"
+        f"Заблокирован: {'да' if row.get('banned') else 'нет'}\n"
+        f"{partner_line}\n\n"
 
         f"🏆 Ранг: {rank_name}{next_rank_line}\n"
         f"📦 Товаров куплено всего: {row.get('total_items', 0)}\n"
