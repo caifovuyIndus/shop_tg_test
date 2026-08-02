@@ -98,6 +98,12 @@ logger = logging.getLogger(__name__)
 # ========== КОНСТАНТЫ ==========
 BASE_PRICE: int = 13   # Базовая цена товара в EUR. Менять только здесь.
 
+# Тестовый режим цены (только для проверки оплаты, например в CryptoBot).
+# Переключается командой /testprice (только super_admin). НЕ хранится в БД —
+# просто переменная в памяти процесса, сбрасывается при рестарте бота.
+TEST_PRICE_MODE: bool = False
+TEST_PRICE_VALUE: float = 1.0
+
 # ========== ПАРТНЁРСКАЯ ПРОГРАММА ==========
 PARTNER_REWARD: float = 5.0              # € партнёру за первый подтверждённый заказ приглашённого
 PARTNER_NEW_USER_BONUS: float = 2.0      # € скидка новому пользователю (тот же размер, что и в обычной рефералке)
@@ -475,6 +481,17 @@ async def init_db():
         await conn.execute("""
             ALTER TABLE orders
             ADD COLUMN IF NOT EXISTS admin_message_ids TEXT DEFAULT ''
+        """)
+
+        # CryptoBot: ID инвойса Crypto Pay API + флаг автоматического подтверждения
+        # оплаты (проверяется фоновым поллером, см. _cryptobot_poll_loop)
+        await conn.execute("""
+            ALTER TABLE orders
+            ADD COLUMN IF NOT EXISTS crypto_invoice_id BIGINT DEFAULT NULL
+        """)
+        await conn.execute("""
+            ALTER TABLE orders
+            ADD COLUMN IF NOT EXISTS crypto_paid BOOLEAN DEFAULT false
         """)
 
         # Отдельно храним message_id уведомления "заказ оформлен" у высших
@@ -1218,11 +1235,15 @@ TEXTS = {
         "createpromo_usage": "Использование:\n/createpromo discount СУММА КОЛИЧЕСТВО\n/createpromo freejar КОЛИЧЕСТВО",
         "createpromo_done": "✅ Создано {count} промокодов:\n{codes}",
         "pay_usdt_btn": "💵 USDT (TRC20)",
+        "pay_cryptobot_btn": "💎 CryptoBot",
         "pay_card_btn": "💳 Банковская карта",
         "pay_currency_title": "💳 Выбери валюту оплаты:",
         "pay_card_uah_btn": "🇺🇦 Оплата в гривне (UAH)",
         "pay_card_eur_btn": "💶 Оплата в евро (EUR)",
         "pay_usdt_screen": "💶 Сумма заказа:\n{eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 К оплате:\n{usdt} USDT (TRC20)\n\n📥 Адрес:\n`{wallet}`\n\nНажмите на адрес для копирования.",
+        "pay_cryptobot_screen": "💎 Оплата через CryptoBot\n\n💶 Сумма заказа: {eur}€\n💵 К оплате: {usdt} USDT\n\nНажми кнопку ниже, чтобы оплатить. Бот сам увидит оплату — ничего дополнительно нажимать не нужно.",
+        "pay_cryptobot_pay_btn": "💳 Оплатить",
+        "cryptobot_error": "❌ Не удалось создать счёт для оплаты. Попробуй другой способ оплаты или напиши администратору.",
         "pay_card_eur_screen": "💶 Сумма заказа:\n{eur}€\n\n📥 Карта:\n`{card}`\n\nНажмите на номер карты для копирования.",
         "pay_card_uah_screen": "💶 Сумма заказа:\n{eur}€\n\n💱 Курс:\n1 EUR = {rate} UAH\n\n💳 К оплате:\n{uah} UAH\n\n📥 Карта:\n`{card}`\n\nНажмите на номер карты для копирования.",
         "pay_i_paid_btn": "✅ Я оплатил",
@@ -1451,11 +1472,15 @@ TEXTS = {
         "createpromo_usage": "Використання:\n/createpromo discount СУМА КІЛЬКІСТЬ\n/createpromo freejar КІЛЬКІСТЬ",
         "createpromo_done": "✅ Створено {count} промокодів:\n{codes}",
         "pay_usdt_btn": "💵 USDT (TRC20)",
+        "pay_cryptobot_btn": "💎 CryptoBot",
         "pay_card_btn": "💳 Банківська карта",
         "pay_currency_title": "💳 Оберіть валюту оплати:",
         "pay_card_uah_btn": "🇺🇦 Оплата в гривні (UAH)",
         "pay_card_eur_btn": "💶 Оплата в євро (EUR)",
         "pay_usdt_screen": "💶 Сума замовлення:\n{eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 До оплати:\n{usdt} USDT (TRC20)\n\n📥 Адреса:\n`{wallet}`\n\nНатисніть на адресу для копіювання.",
+        "pay_cryptobot_screen": "💎 Оплата через CryptoBot\n\n💶 Сума замовлення: {eur}€\n💵 До оплати: {usdt} USDT\n\nНатисни кнопку нижче, щоб оплатити. Бот сам побачить оплату — більше нічого натискати не потрібно.",
+        "pay_cryptobot_pay_btn": "💳 Оплатити",
+        "cryptobot_error": "❌ Не вдалося створити рахунок для оплати. Спробуй інший спосіб оплати або напиши адміністратору.",
         "pay_card_eur_screen": "💶 Сума замовлення:\n{eur}€\n\n📥 Карта:\n`{card}`\n\nНатисніть на номер картки для копіювання.",
         "pay_card_uah_screen": "💶 Сума замовлення:\n{eur}€\n\n💱 Курс:\n1 EUR = {rate} UAH\n\n💳 До оплати:\n{uah} UAH\n\n📥 Карта:\n`{card}`\n\nНатисніть на номер картки для копіювання.",
         "pay_i_paid_btn": "✅ Я оплатив",
@@ -1684,11 +1709,15 @@ TEXTS = {
         "createpromo_usage": "Verwendung:\n/createpromo discount BETRAG ANZAHL\n/createpromo freejar ANZAHL",
         "createpromo_done": "✅ {count} Promocodes erstellt:\n{codes}",
         "pay_usdt_btn": "💵 USDT (TRC20)",
+        "pay_cryptobot_btn": "💎 CryptoBot",
         "pay_card_btn": "💳 Bankkarte",
         "pay_currency_title": "💳 Zahlungswährung wählen:",
         "pay_card_uah_btn": "🇺🇦 Zahlung in Hrywnja (UAH)",
         "pay_card_eur_btn": "💶 Zahlung in Euro (EUR)",
         "pay_usdt_screen": "💶 Bestellsumme:\n{eur}€\n\n💲 Kurs:\n1 EUR = {rate} USDT\n\n💵 Zu zahlen:\n{usdt} USDT (TRC20)\n\n📥 Adresse:\n`{wallet}`\n\nAdresse antippen zum Kopieren.",
+        "pay_cryptobot_screen": "💎 Zahlung über CryptoBot\n\n💶 Bestellsumme: {eur}€\n💵 Zu zahlen: {usdt} USDT\n\nTippe auf den Button unten, um zu bezahlen. Der Bot erkennt die Zahlung automatisch — du musst nichts weiter tun.",
+        "pay_cryptobot_pay_btn": "💳 Bezahlen",
+        "cryptobot_error": "❌ Rechnung konnte nicht erstellt werden. Versuche eine andere Zahlungsmethode oder kontaktiere den Administrator.",
         "pay_card_eur_screen": "💶 Bestellsumme:\n{eur}€\n\n📥 Karte:\n`{card}`\n\nKartennummer antippen zum Kopieren.",
         "pay_card_uah_screen": "💶 Bestellsumme:\n{eur}€\n\n💱 Kurs:\n1 EUR = {rate} UAH\n\n💳 Zu zahlen:\n{uah} UAH\n\n📥 Karte:\n`{card}`\n\nKartennummer antippen zum Kopieren.",
         "pay_i_paid_btn": "✅ Ich habe bezahlt",
@@ -1966,6 +1995,11 @@ async def calculate_final_price(uid, quantity):
       - ref_used        : float — сколько списано из ref_discount (пул пригласившего)
       - ref_bonus_used  : float — сколько списано из ref_bonus (бонус новичка)
     """
+    if TEST_PRICE_MODE:
+        # Тестовая цена: 1€/банку, все скидки отключены. Только для проверки
+        # оплаты (например CryptoBot), включается/выключается через /testprice.
+        return round(TEST_PRICE_VALUE * quantity, 2), 0.0, False, 0.0, 0.0
+
     discounts = await get_user_discounts(uid)
     base_total = BASE_PRICE * quantity
 
@@ -4673,6 +4707,8 @@ async def pay(call):
     kb.add(InlineKeyboardButton(await t(uid, "cash"), callback_data="cash"))
     kb.add(InlineKeyboardButton(await t(uid, "pay_usdt_btn"), callback_data="pay_usdt_delivery"))
     kb.add(InlineKeyboardButton(await t(uid, "pay_card_btn"), callback_data="pay_card_delivery"))
+    if CRYPTOBOT_API_TOKEN:
+        kb.add(InlineKeyboardButton(await t(uid, "pay_cryptobot_btn"), callback_data="pay_cryptobot"))
     kb.add(InlineKeyboardButton(await t(uid, "cancel"), callback_data="open_cart"))
     await render(call, await t(uid, "pay"), kb)
 
@@ -4934,8 +4970,147 @@ async def confirm_cash(call):
 # ========== НОВЫЕ СПОСОБЫ ОПЛАТЫ (DELIVERY) ==========
 
 USDT_WALLET  = "TGZCiwS5fTktQYxeey57KEeSfHXjB1hMQc"
+
+# ========== CRYPTOBOT (Crypto Pay API) ==========
+# Токен приложения из @CryptoBot → Crypto Pay → Create App → API Token
+CRYPTOBOT_API_TOKEN: str | None = os.getenv("CRYPTOBOT_API_TOKEN")
+CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
+CRYPTOBOT_POLL_INTERVAL = 15  # секунд между проверками неоплаченных инвойсов
+CRYPTOBOT_INVOICE_TTL = 1800  # 30 минут на оплату инвойса
 CARD_EUR     = "4400005544191544"
 CARD_UAH     = "4400005545864297"
+
+
+async def cryptobot_create_invoice(usdt_amount: float, order_id: int) -> dict | None:
+    """
+    Создаёт инвойс в Crypto Pay API на сумму usdt_amount USDT.
+    Возвращает dict {"invoice_id": int, "pay_url": str} или None при ошибке.
+    """
+    if not CRYPTOBOT_API_TOKEN:
+        logger.error("cryptobot_create_invoice: CRYPTOBOT_API_TOKEN не задан")
+        return None
+
+    bot_username = await get_bot_username()
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{CRYPTOBOT_API_URL}/createInvoice",
+                headers={"Crypto-Pay-API-Token": CRYPTOBOT_API_TOKEN},
+                json={
+                    "asset": "USDT",
+                    "amount": str(usdt_amount),
+                    "description": f"Заказ #{order_id}",
+                    "payload": str(order_id),
+                    "paid_btn_name": "openBot",
+                    "paid_btn_url": f"https://t.me/{bot_username}",
+                    "allow_comments": False,
+                    "allow_anonymous": False,
+                    "expires_in": CRYPTOBOT_INVOICE_TTL,
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            data = await resp.json()
+        if not data.get("ok"):
+            logger.error("cryptobot_create_invoice: %s", data.get("error"))
+            return None
+        result = data["result"]
+        return {
+            "invoice_id": result["invoice_id"],
+            "pay_url": result.get("bot_invoice_url") or result.get("pay_url"),
+        }
+    except Exception:
+        logger.exception("cryptobot_create_invoice: ошибка запроса")
+        return None
+
+
+async def cryptobot_get_invoices_status(invoice_ids: list[int]) -> dict[int, str]:
+    """
+    Проверяет статус списка инвойсов одним запросом.
+    Возвращает {invoice_id: status}, status ∈ {"active", "paid", "expired"}.
+    """
+    if not CRYPTOBOT_API_TOKEN or not invoice_ids:
+        return {}
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.get(
+                f"{CRYPTOBOT_API_URL}/getInvoices",
+                headers={"Crypto-Pay-API-Token": CRYPTOBOT_API_TOKEN},
+                params={"invoice_ids": ",".join(str(i) for i in invoice_ids)},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            data = await resp.json()
+        if not data.get("ok"):
+            logger.error("cryptobot_get_invoices_status: %s", data.get("error"))
+            return {}
+        return {inv["invoice_id"]: inv["status"] for inv in data["result"]["items"]}
+    except Exception:
+        logger.exception("cryptobot_get_invoices_status: ошибка запроса")
+        return {}
+
+
+async def _cryptobot_notify_paid(order_id: int) -> None:
+    """
+    Вызывается поллером, когда CryptoBot подтвердил оплату инвойса.
+    НЕ трогает статус заказа и НЕ финализирует склад/скидки/стрик — это по-прежнему
+    делает городской админ вручную кнопкой Подтвердить, когда физически отдаёт товар.
+    Только шлёт короткую пометку админам, что оплата уже проверена автоматически —
+    им не нужно самим сверять баланс кошелька.
+    """
+    async with pool.acquire() as conn:
+        order = await conn.fetchrow(
+            "SELECT admin_message_ids, status, crypto_paid FROM orders WHERE id=$1", order_id
+        )
+        if not order or order["status"] != "pending" or order["crypto_paid"]:
+            return  # уже обработан (подтверждён/отменён) или уведомление уже отправлено
+        await conn.execute("UPDATE orders SET crypto_paid=true WHERE id=$1", order_id)
+
+    recipients = set(SUPER_ADMINS)
+    for entry in (order["admin_message_ids"] or "").split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            try:
+                recipients.add(int(entry.split(":", 1)[0]))
+            except ValueError:
+                pass
+
+    note = f"✅ Заказ #{order_id} — оплата подтверждена автоматически через CryptoBot."
+    for chat_id in recipients:
+        try:
+            await bot.send_message(chat_id, note)
+        except Exception:
+            pass
+
+
+async def _cryptobot_poll_loop() -> None:
+    """
+    Фоновая задача: раз в CRYPTOBOT_POLL_INTERVAL секунд проверяет все pending-заказы
+    с непроверенным CryptoBot-инвойсом. Крутится всё время работы бота (см. run()).
+    """
+    if not CRYPTOBOT_API_TOKEN:
+        return  # интеграция не настроена — задачу можно не запускать
+
+    while True:
+        await asyncio.sleep(CRYPTOBOT_POLL_INTERVAL)
+        try:
+            async with pool.acquire() as conn:
+                pending = await conn.fetch("""
+                    SELECT id, crypto_invoice_id FROM orders
+                    WHERE status='pending' AND crypto_invoice_id IS NOT NULL AND crypto_paid=false
+                """)
+            if not pending:
+                continue
+
+            invoice_ids = [r["crypto_invoice_id"] for r in pending]
+            order_by_invoice = {r["crypto_invoice_id"]: r["id"] for r in pending}
+
+            statuses = await cryptobot_get_invoices_status(invoice_ids)
+            for invoice_id, status in statuses.items():
+                if status == "paid":
+                    order_id = order_by_invoice.get(invoice_id)
+                    if order_id:
+                        await _cryptobot_notify_paid(order_id)
+        except Exception:
+            logger.exception("_cryptobot_poll_loop: ошибка итерации")
 
 
 async def _get_cart_totals(uid: int):
@@ -5173,7 +5348,79 @@ async def paid_usdt(call):
     await notify_no_username(call, uid)
 
 
-# --- КАРТА: выбор валюты ---
+@dp.callback_query_handler(lambda c: c.data == "pay_cryptobot")
+async def pay_cryptobot(call):
+    """
+    Оплата через CryptoBot (Crypto Pay API). В отличие от ручного USDT-перевода,
+    тут не нужна кнопка "Я оплатил" — заказ создаётся сразу, а фоновый поллер
+    (_cryptobot_poll_loop) сам заметит оплату и пришлёт админам пометку об этом.
+    Городской админ всё равно жмёт Подтвердить/Отменить сам — это физическая
+    выдача товара, автоматизировать её нельзя и не нужно.
+    """
+    if not await check_not_banned(call):
+        return
+    uid = call.from_user.id
+    username = call.from_user.username or str(uid)
+
+    if not CRYPTOBOT_API_TOKEN:
+        await call.answer(await t(uid, "cryptobot_error"), show_alert=True)
+        return
+
+    problems = await check_cart_stock(uid)
+    if problems:
+        await call.answer(await _format_stock_errors(uid, problems), show_alert=True)
+        return
+
+    result = await _get_cart_totals(uid)
+    if not result:
+        await render(call, await t(uid, "empty_cart"))
+        return
+    _, eur_total, discount, items_str, text_admin = result
+
+    rate = await get_user_rate(uid, "usdt")
+    if not rate:
+        await call.answer(await t(uid, "rate_unavailable"), show_alert=True)
+        return
+    usdt_amount = round(eur_total * rate, 2)
+
+    result = await _create_pending_order(uid, items_str, eur_total, discount, "cryptobot")
+    if result is None:
+        await call.answer(await t(uid, "stock_changed_retry"), show_alert=True)
+        return
+    order_id, resolved_city = result
+
+    invoice = await cryptobot_create_invoice(usdt_amount, order_id)
+    if not invoice:
+        # Откатываем созданный заказ — оплатить нечем, не оставляем "битый" pending-заказ
+        async with pool.acquire() as conn:
+            await release_reserved_stock(conn, order_id)
+            await conn.execute("UPDATE orders SET status='cancelled' WHERE id=$1", order_id)
+        await call.answer(await t(uid, "cryptobot_error"), show_alert=True)
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE orders SET crypto_invoice_id=$1 WHERE id=$2",
+            invoice["invoice_id"], order_id
+        )
+
+    payment_line = (
+        f"Оплата: CryptoBot (автопроверка)\n"
+        f"Сумма EUR: {fmt_amount(eur_total)}€\n"
+        f"К оплате: {fmt_amount(usdt_amount)} USDT\n"
+        f"ИТОГО: {fmt_amount(eur_total)}€"
+    )
+    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city, items_str=items_str, discount=discount)
+
+    text = (await t(uid, "pay_cryptobot_screen")).format(
+        eur=fmt_amount(eur_total),
+        usdt=fmt_amount(usdt_amount),
+    )
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton(await t(uid, "pay_cryptobot_pay_btn"), url=invoice["pay_url"]))
+    await render(call, text, kb)
+    await notify_no_username(call, uid)
+
 
 @dp.callback_query_handler(lambda c: c.data == "pay_card_delivery")
 async def pay_card_delivery(call):
@@ -6425,6 +6672,12 @@ async def _build_sales_report(date_from: date, date_to: date, city_key: str | No
     Учитывает только confirmed-заказы (не отменённые и не pending).
     Бесплатные банки (gift_requests) не учитываются — они не проходят через orders.
     city_key: если указан — только этот город; если None — все города вместе.
+
+    ВАЖНО: цена и скидка НЕ берутся из products.price (то поле может быть
+    устаревшим после смены BASE_PRICE) — вместо этого листинговая цена и скидка
+    восстанавливаются из самого заказа (order.total + order.discount) и
+    размазываются пропорционально по позициям внутри заказа. Это остаётся
+    корректным даже для старых заказов, сделанных при другой цене.
     """
     date_label = (
         date_from.strftime("%d.%m")
@@ -6448,23 +6701,45 @@ async def _build_sales_report(date_from: date, date_to: date, city_key: str | No
         if not orders:
             return f"{header}\nЗаказов не найдено."
 
-        # Собираем агрегацию по product_id
-        sales: dict[int, int] = {}  # pid → total_qty
+        # Собираем агрегацию по product_id: qty, листинговая сумма, скидка, выручка
+        sales: dict[int, dict] = {}  # pid → {"qty":, "listed":, "discount":, "revenue":}
+        total_jars = 0
+        total_listed = 0.0
+        total_discount = 0.0
         total_revenue = 0.0
 
         for order in orders:
-            # total в заказе — уже итоговая сумма после скидки, это выручка
-            total_revenue += float(order["total"] or 0)
-            for pid, qty in _parse_items_str(order["items"]):
-                sales[pid] = sales.get(pid, 0) + qty
+            items = _parse_items_str(order["items"])
+            order_qty = sum(qty for _, qty in items)
+            if order_qty == 0:
+                continue
+
+            order_total = float(order["total"] or 0)
+            order_discount = float(order["discount"] or 0)
+            order_listed = order_total + order_discount  # цена ДО скидки, восстановленная из заказа
+
+            listed_per_jar = order_listed / order_qty
+            discount_per_jar = order_discount / order_qty
+
+            for pid, qty in items:
+                entry = sales.setdefault(pid, {"qty": 0, "listed": 0.0, "discount": 0.0, "revenue": 0.0})
+                entry["qty"] += qty
+                entry["listed"] += listed_per_jar * qty
+                entry["discount"] += discount_per_jar * qty
+                entry["revenue"] += (listed_per_jar - discount_per_jar) * qty
+
+            total_jars += order_qty
+            total_listed += order_listed
+            total_discount += order_discount
+            total_revenue += order_total
 
         if not sales:
             return f"{header}\nДанных нет."
 
-        # Загружаем данные о товарах одним запросом
+        # Загружаем названия/категории товаров одним запросом
         pids = list(sales.keys())
         products_rows = await conn.fetch("""
-            SELECT id, name_ru, price, category
+            SELECT id, name_ru, category
             FROM products
             WHERE id = ANY($1::int[])
         """, pids)
@@ -6473,18 +6748,14 @@ async def _build_sales_report(date_from: date, date_to: date, city_key: str | No
 
         # Разбивка по категориям
         by_category: dict[str, list[tuple[str, int, float]]] = {"elfliq": [], "elfworld": []}
-        total_jars = 0
 
-        for pid, qty in sorted(sales.items(), key=lambda x: -x[1]):
+        for pid, entry in sorted(sales.items(), key=lambda x: -x[1]["qty"]):
             info = prod_info.get(pid)
             if not info:
                 continue
             name = info["name_ru"]
-            price = float(info["price"] or 0)
-            revenue = round(price * qty, 2)
             cat = info["category"] or "elfliq"
-            by_category.setdefault(cat, []).append((name, qty, revenue))
-            total_jars += qty
+            by_category.setdefault(cat, []).append((name, entry["qty"], entry["revenue"]))
 
     # Формируем отчёт
     lines = [header]
@@ -6494,11 +6765,13 @@ async def _build_sales_report(date_from: date, date_to: date, city_key: str | No
         if not items_in_cat:
             continue
         lines.append(f"\n{cat_label}:")
-        for name, qty, rev in items_in_cat:
-            lines.append(f"  {name} — {qty} шт. — {rev:.2f}€")
+        for name, qty, revenue in items_in_cat:
+            lines.append(f"  {name} — {qty} шт. — заработано {revenue:.2f}€")
 
     lines.append(f"\n────────────────")
     lines.append(f"Всего банок: {total_jars}")
+    lines.append(f"Сумма без скидок: {total_listed:.2f}€")
+    lines.append(f"Сумма скидок: -{total_discount:.2f}€")
     lines.append(f"Выручка: {total_revenue:.2f}€")
 
     return "\n".join(lines)
@@ -7000,6 +7273,35 @@ def _format_stats_block(stats: dict, title: str) -> str:
         f"💰 Выручка за текущий месяц: {stats['revenue_month']:.2f}€\n"
         f"📦 Заказов за текущий месяц: {stats['total_orders_month']}"
     )
+
+
+@dp.message_handler(commands=["testprice"])
+async def testprice_cmd(message: types.Message):
+    """
+    /testprice — переключатель тестовой цены (только super_admin).
+    Включено: все банки стоят 1€, скидки не применяются — удобно для проверки
+    оплаты (например CryptoBot) без траты реальных денег. Повторный вызов
+    выключает тестовый режим и возвращает обычное ценообразование.
+    Ничего не пишется в БД — просто флаг в памяти процесса, сбрасывается
+    при рестарте бота.
+    """
+    global TEST_PRICE_MODE
+    if not is_super_admin(message.from_user.id):
+        return
+
+    TEST_PRICE_MODE = not TEST_PRICE_MODE
+
+    if TEST_PRICE_MODE:
+        await message.answer(
+            f"🧪 Тестовая цена ВКЛЮЧЕНА.\n"
+            f"Все банки сейчас стоят {TEST_PRICE_VALUE}€, скидки отключены.\n"
+            f"Повтори /testprice, чтобы вернуть обычную цену."
+        )
+    else:
+        await message.answer(
+            f"✅ Тестовая цена ВЫКЛЮЧЕНА.\n"
+            f"Цена вернулась к обычной ({BASE_PRICE}€ + скидки)."
+        )
 
 
 @dp.message_handler(commands=["stats"])
@@ -7653,6 +7955,7 @@ async def on_startup(dp):
 
 async def run():
     await on_startup(dp)
+    asyncio.create_task(_cryptobot_poll_loop())
     await dp.start_polling(reset_webhook=True)
 
 
