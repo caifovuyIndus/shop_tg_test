@@ -493,6 +493,17 @@ async def init_db():
             ALTER TABLE orders
             ADD COLUMN IF NOT EXISTS crypto_paid BOOLEAN DEFAULT false
         """)
+        # Время истечения инвойса (created_at + TTL) — для авто-отмены поллером
+        await conn.execute("""
+            ALTER TABLE orders
+            ADD COLUMN IF NOT EXISTS crypto_expires_at TIMESTAMP DEFAULT NULL
+        """)
+        # message_id экрана оплаты у пользователя — чтобы удалить/отредактировать
+        # его при отмене/оплате/истечении срока
+        await conn.execute("""
+            ALTER TABLE orders
+            ADD COLUMN IF NOT EXISTS user_message_id BIGINT DEFAULT NULL
+        """)
 
         # Отдельно храним message_id уведомления "заказ оформлен" у высших
         # админов, чтобы удалять его при подтверждении/отмене заказа
@@ -1241,9 +1252,14 @@ TEXTS = {
         "pay_card_uah_btn": "🇺🇦 Оплата в гривне (UAH)",
         "pay_card_eur_btn": "💶 Оплата в евро (EUR)",
         "pay_usdt_screen": "💶 Сумма заказа:\n{eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 К оплате:\n{usdt} USDT (TRC20)\n\n📥 Адрес:\n`{wallet}`\n\nНажмите на адрес для копирования.",
-        "pay_cryptobot_screen": "💎 Оплата через CryptoBot\n\n💶 Сумма заказа: {eur}€\n💵 К оплате: {usdt} USDT\n\nНажми кнопку ниже, чтобы оплатить. Бот сам увидит оплату — ничего дополнительно нажимать не нужно.",
+        "pay_cryptobot_screen": "💎 Оплата через CryptoBot\n\n💶 Сумма заказа: {eur}€\n💵 К оплате: {usdt} USDT\n\n⏳ У тебя есть {minutes} минут на оплату (до {deadline}).\n\nНажми кнопку ниже, чтобы оплатить. Бот сам увидит оплату — ничего дополнительно нажимать не нужно.",
         "pay_cryptobot_pay_btn": "💳 Оплатить",
         "cryptobot_error": "❌ Не удалось создать счёт для оплаты. Попробуй другой способ оплаты или напиши администратору.",
+        "crypto_cancel_btn": "❌ Отменить заказ",
+        "crypto_cancelled_by_user": "❌ Заказ #{id} отменён по твоей просьбе.",
+        "crypto_cancelled_by_admin": "❌ Твой заказ #{id} отменён администрацией. Если это ошибка — напиши администратору.",
+        "crypto_cancelled_expired": "⌛ Время на оплату заказа #{id} истекло. Заказ отменён — можешь оформить его заново.",
+        "crypto_payment_confirmed": "✅ Оплата получена! Заказ #{id} подтверждён — скоро можно будет забрать.",
         "pay_card_eur_screen": "💶 Сумма заказа:\n{eur}€\n\n📥 Карта:\n`{card}`\n\nНажмите на номер карты для копирования.",
         "pay_card_uah_screen": "💶 Сумма заказа:\n{eur}€\n\n💱 Курс:\n1 EUR = {rate} UAH\n\n💳 К оплате:\n{uah} UAH\n\n📥 Карта:\n`{card}`\n\nНажмите на номер карты для копирования.",
         "pay_i_paid_btn": "✅ Я оплатил",
@@ -1478,9 +1494,14 @@ TEXTS = {
         "pay_card_uah_btn": "🇺🇦 Оплата в гривні (UAH)",
         "pay_card_eur_btn": "💶 Оплата в євро (EUR)",
         "pay_usdt_screen": "💶 Сума замовлення:\n{eur}€\n\n💲 Курс:\n1 EUR = {rate} USDT\n\n💵 До оплати:\n{usdt} USDT (TRC20)\n\n📥 Адреса:\n`{wallet}`\n\nНатисніть на адресу для копіювання.",
-        "pay_cryptobot_screen": "💎 Оплата через CryptoBot\n\n💶 Сума замовлення: {eur}€\n💵 До оплати: {usdt} USDT\n\nНатисни кнопку нижче, щоб оплатити. Бот сам побачить оплату — більше нічого натискати не потрібно.",
+        "pay_cryptobot_screen": "💎 Оплата через CryptoBot\n\n💶 Сума замовлення: {eur}€\n💵 До оплати: {usdt} USDT\n\n⏳ У тебе є {minutes} хвилин на оплату (до {deadline}).\n\nНатисни кнопку нижче, щоб оплатити. Бот сам побачить оплату — більше нічого натискати не потрібно.",
         "pay_cryptobot_pay_btn": "💳 Оплатити",
         "cryptobot_error": "❌ Не вдалося створити рахунок для оплати. Спробуй інший спосіб оплати або напиши адміністратору.",
+        "crypto_cancel_btn": "❌ Скасувати замовлення",
+        "crypto_cancelled_by_user": "❌ Замовлення #{id} скасовано на твоє прохання.",
+        "crypto_cancelled_by_admin": "❌ Твоє замовлення #{id} скасовано адміністрацією. Якщо це помилка — напиши адміністратору.",
+        "crypto_cancelled_expired": "⌛ Час на оплату замовлення #{id} сплив. Замовлення скасовано — можеш оформити його знову.",
+        "crypto_payment_confirmed": "✅ Оплату отримано! Замовлення #{id} підтверджено — скоро можна буде забрати.",
         "pay_card_eur_screen": "💶 Сума замовлення:\n{eur}€\n\n📥 Карта:\n`{card}`\n\nНатисніть на номер картки для копіювання.",
         "pay_card_uah_screen": "💶 Сума замовлення:\n{eur}€\n\n💱 Курс:\n1 EUR = {rate} UAH\n\n💳 До оплати:\n{uah} UAH\n\n📥 Карта:\n`{card}`\n\nНатисніть на номер картки для копіювання.",
         "pay_i_paid_btn": "✅ Я оплатив",
@@ -1715,9 +1736,14 @@ TEXTS = {
         "pay_card_uah_btn": "🇺🇦 Zahlung in Hrywnja (UAH)",
         "pay_card_eur_btn": "💶 Zahlung in Euro (EUR)",
         "pay_usdt_screen": "💶 Bestellsumme:\n{eur}€\n\n💲 Kurs:\n1 EUR = {rate} USDT\n\n💵 Zu zahlen:\n{usdt} USDT (TRC20)\n\n📥 Adresse:\n`{wallet}`\n\nAdresse antippen zum Kopieren.",
-        "pay_cryptobot_screen": "💎 Zahlung über CryptoBot\n\n💶 Bestellsumme: {eur}€\n💵 Zu zahlen: {usdt} USDT\n\nTippe auf den Button unten, um zu bezahlen. Der Bot erkennt die Zahlung automatisch — du musst nichts weiter tun.",
+        "pay_cryptobot_screen": "💎 Zahlung über CryptoBot\n\n💶 Bestellsumme: {eur}€\n💵 Zu zahlen: {usdt} USDT\n\n⏳ Du hast {minutes} Minuten Zeit zum Bezahlen (bis {deadline}).\n\nTippe auf den Button unten, um zu bezahlen. Der Bot erkennt die Zahlung automatisch — du musst nichts weiter tun.",
         "pay_cryptobot_pay_btn": "💳 Bezahlen",
         "cryptobot_error": "❌ Rechnung konnte nicht erstellt werden. Versuche eine andere Zahlungsmethode oder kontaktiere den Administrator.",
+        "crypto_cancel_btn": "❌ Bestellung stornieren",
+        "crypto_cancelled_by_user": "❌ Bestellung #{id} wurde auf deinen Wunsch storniert.",
+        "crypto_cancelled_by_admin": "❌ Deine Bestellung #{id} wurde von der Administration storniert. Falls das ein Fehler ist, wende dich an den Administrator.",
+        "crypto_cancelled_expired": "⌛ Die Zahlungsfrist für Bestellung #{id} ist abgelaufen. Die Bestellung wurde storniert — du kannst sie erneut aufgeben.",
+        "crypto_payment_confirmed": "✅ Zahlung erhalten! Bestellung #{id} wurde bestätigt — bald abholbereit.",
         "pay_card_eur_screen": "💶 Bestellsumme:\n{eur}€\n\n📥 Karte:\n`{card}`\n\nKartennummer antippen zum Kopieren.",
         "pay_card_uah_screen": "💶 Bestellsumme:\n{eur}€\n\n💱 Kurs:\n1 EUR = {rate} UAH\n\n💳 Zu zahlen:\n{uah} UAH\n\n📥 Karte:\n`{card}`\n\nKartennummer antippen zum Kopieren.",
         "pay_i_paid_btn": "✅ Ich habe bezahlt",
@@ -5048,43 +5074,219 @@ async def cryptobot_get_invoices_status(invoice_ids: list[int]) -> dict[int, str
         return {}
 
 
-async def _cryptobot_notify_paid(order_id: int) -> None:
+async def cryptobot_delete_invoice(invoice_id: int) -> bool:
+    """
+    Удаляет инвойс в Crypto Pay API — после этого пользователь физически
+    не сможет его оплатить (ссылка перестаёт работать). Используется при
+    отмене заказа (админом, пользователем или по истечении срока).
+    Если инвойс уже оплачен или уже удалён — API вернёт ok=false, это не ошибка,
+    просто ничего страшного не произошло.
+    """
+    if not CRYPTOBOT_API_TOKEN:
+        return False
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{CRYPTOBOT_API_URL}/deleteInvoice",
+                headers={"Crypto-Pay-API-Token": CRYPTOBOT_API_TOKEN},
+                json={"invoice_id": invoice_id},
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            data = await resp.json()
+        return bool(data.get("ok"))
+    except Exception:
+        logger.exception("cryptobot_delete_invoice: ошибка запроса invoice_id=%s", invoice_id)
+        return False
+
+
+async def _order_summary_parts(order_row) -> tuple[str, str]:
+    """
+    Восстанавливает (buyer_label, items_readable) из строки orders — используется
+    при редактировании сообщений о заказе там, где исходный текст недоступен
+    (например из фоновой задачи-поллера, а не из callback-хендлера).
+    """
+    user_id = order_row["user_id"]
+    async with pool.acquire() as conn:
+        uname = await conn.fetchval("SELECT username FROM users WHERE user_id=$1", user_id)
+
+        item_parts = [p for p in (order_row["items"] or "").split(",") if ":" in p]
+        pids = [int(p.split(":")[0]) for p in item_parts]
+        prod_rows = await conn.fetch(
+            "SELECT id, name_ru FROM products WHERE id = ANY($1::int[])", pids
+        ) if pids else []
+
+    prod_map = {r["id"]: r["name_ru"] for r in prod_rows}
+    items_readable = "\n".join(
+        f"  • {prod_map.get(int(p.split(':')[0]), p.split(':')[0])} x{p.split(':')[1]}"
+        for p in item_parts
+    )
+    buyer_label = f"@{uname}" if uname else f"<code>{user_id}</code>"
+    return buyer_label, items_readable
+
+
+async def _cryptobot_auto_confirm(order_id: int) -> None:
     """
     Вызывается поллером, когда CryptoBot подтвердил оплату инвойса.
-    НЕ трогает статус заказа и НЕ финализирует склад/скидки/стрик — это по-прежнему
-    делает городской админ вручную кнопкой Подтвердить, когда физически отдаёт товар.
-    Только шлёт короткую пометку админам, что оплата уже проверена автоматически —
-    им не нужно самим сверять баланс кошелька.
+    Полностью финализирует заказ (как обычное подтверждение админом кнопкой) —
+    склад, ранг/стрик/рулетка, реферал/партнёрка. Редактирует исходную карточку
+    у городских админов (кнопки исчезают — решение уже принято автоматически),
+    уведомляет высших админов и меняет "экран оплаты" у пользователя на "оплата получена".
     """
     async with pool.acquire() as conn:
-        order = await conn.fetchrow(
-            "SELECT admin_message_ids, status, crypto_paid FROM orders WHERE id=$1", order_id
+        check = await conn.fetchrow(
+            "SELECT status, crypto_paid FROM orders WHERE id=$1", order_id
         )
-        if not order or order["status"] != "pending" or order["crypto_paid"]:
-            return  # уже обработан (подтверждён/отменён) или уведомление уже отправлено
+    if not check or check["status"] != "pending" or check["crypto_paid"]:
+        return  # уже обработан (в т.ч. вручную отменён) или уведомление уже отправлено
+
+    async with pool.acquire() as conn:
         await conn.execute("UPDATE orders SET crypto_paid=true WHERE id=$1", order_id)
 
-    recipients = set(SUPER_ADMINS)
-    for entry in (order["admin_message_ids"] or "").split(","):
-        entry = entry.strip()
-        if ":" in entry:
-            try:
-                recipients.add(int(entry.split(":", 1)[0]))
-            except ValueError:
-                pass
+    result = await _finalize_order_confirmed(order_id)
+    if result is None:
+        return  # гонка — заказ успели обработать иначе между проверками
 
-    note = f"✅ Заказ #{order_id} — оплата подтверждена автоматически через CryptoBot."
-    for chat_id in recipients:
+    user_id = result["user_id"]
+    items = result["items"]
+    order_city_name = result["order_city_name"]
+    order_discount = result["order_discount"]
+    order_total = result["order_total"]
+    msg_ids_raw = result["admin_message_ids"]
+    super_msg_ids_raw = result["super_message_ids"]
+    created_at = result["created_at"]
+
+    buyer_label, items_readable = await _order_summary_parts({"user_id": user_id, "items": items})
+    base_text = (
+        f"🏪 Самовывоз | 🏙 {order_city_name}\n"
+        f"{items_readable}\n"
+        f"ID: {order_id}\n"
+        f"User: {buyer_label}"
+    )
+    # Кнопок для CryptoBot-заказов и так была только "Отменить" (см. crypto_pending=True
+    # при отправке) — теперь убираем и её, решение принято автоматически.
+    await _sync_admin_messages(
+        msg_ids_raw=msg_ids_raw,
+        actor_id=0,
+        base_text=base_text,
+        status_self="\n\n✅ ПОДТВЕРЖДЕНО (оплата CryptoBot)",
+        status_others="\n\n✅ ПОДТВЕРЖДЕНО (оплата CryptoBot)",
+    )
+
+    await _delete_super_order_messages(super_msg_ids_raw)
+    created_str = created_at.strftime("%d.%m.%Y %H:%M") if created_at else "—"
+    confirmed_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+    super_notify = (
+        f"✅ Заказ #{order_id} подтверждён автоматически (CryptoBot)\n\n"
+        f"🏙 Город: {order_city_name}\n"
+        f"👤 Покупатель: {buyer_label}\n"
+        f"📦 Товары:\n{items_readable}\n"
+        f"💰 Итого: {order_total}€"
+        + (f"\n🎁 Сэкономлено: {order_discount}€" if order_discount else "")
+        + f"\n\n📅 Оформлен: {created_str}\n✅ Подтверждён: {confirmed_str}"
+    )
+    for super_id in SUPER_ADMINS:
         try:
-            await bot.send_message(chat_id, note)
+            await bot.send_message(super_id, super_notify)
         except Exception:
             pass
+
+    # Пользователю — заменяем экран оплаты (с кнопками "оплатить"/"отменить")
+    # на короткое "оплата получена", чтобы старые кнопки больше не сбивали с толку.
+    async with pool.acquire() as conn:
+        user_msg_id = await conn.fetchval(
+            "SELECT user_message_id FROM orders WHERE id=$1", order_id
+        )
+    success_text = (await t(user_id, "crypto_payment_confirmed")).format(id=order_id)
+    if user_msg_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=user_id, message_id=user_msg_id,
+                text=success_text, reply_markup=None
+            )
+        except Exception:
+            try:
+                await bot.send_message(user_id, success_text)
+            except Exception:
+                pass
+    else:
+        try:
+            await bot.send_message(user_id, success_text)
+        except Exception:
+            pass
+
+
+async def _cryptobot_auto_cancel(order_id: int) -> None:
+    """
+    Автоматическая отмена CryptoBot-заказа по истечении срока оплаты.
+    Гасит инвойс, возвращает резерв склада, редактирует карточку у городских
+    админов, уведомляет высших, удаляет "экран оплаты" у пользователя и
+    присылает новое сообщение об отмене.
+    """
+    async with pool.acquire() as conn:
+        order = await conn.fetchrow("""
+            SELECT status, user_id, items, city_key, admin_message_ids, super_message_ids,
+                   crypto_invoice_id, crypto_paid, user_message_id
+            FROM orders WHERE id=$1
+        """, order_id)
+
+    if not order or order["status"] != "pending" or order["crypto_paid"]:
+        return
+
+    async with pool.acquire() as conn:
+        cancelled_id = await conn.fetchval(
+            "UPDATE orders SET status='cancelled' WHERE id=$1 AND status='pending' RETURNING id",
+            order_id
+        )
+        if not cancelled_id:
+            return
+        await release_reserved_stock(conn, order_id)
+
+    if order["crypto_invoice_id"]:
+        await cryptobot_delete_invoice(order["crypto_invoice_id"])
+
+    user_id = order["user_id"]
+    buyer_label, items_readable = await _order_summary_parts(order)
+    order_city_name = CITIES.get(order["city_key"] or "", {}).get("name", "—")
+    base_text = (
+        f"🏪 Самовывоз | 🏙 {order_city_name}\n"
+        f"{items_readable}\n"
+        f"ID: {order_id}\n"
+        f"User: {buyer_label}"
+    )
+    await _sync_admin_messages(
+        msg_ids_raw=order["admin_message_ids"] or "",
+        actor_id=0,
+        base_text=base_text,
+        status_self="\n\n❌ ОТМЕНЕНО (истёк срок оплаты)",
+        status_others="\n\n❌ ОТМЕНЕНО (истёк срок оплаты)",
+    )
+
+    await _delete_super_order_messages(order["super_message_ids"] or "")
+    super_notify = f"❌ Заказ #{order_id} отменён автоматически — истёк срок оплаты CryptoBot."
+    for super_id in SUPER_ADMINS:
+        try:
+            await bot.send_message(super_id, super_notify)
+        except Exception:
+            pass
+
+    if order["user_message_id"]:
+        try:
+            await bot.delete_message(user_id, order["user_message_id"])
+        except Exception:
+            pass
+    try:
+        await bot.send_message(
+            user_id, (await t(user_id, "crypto_cancelled_expired")).format(id=order_id)
+        )
+    except Exception:
+        pass
 
 
 async def _cryptobot_poll_loop() -> None:
     """
     Фоновая задача: раз в CRYPTOBOT_POLL_INTERVAL секунд проверяет все pending-заказы
-    с непроверенным CryptoBot-инвойсом. Крутится всё время работы бота (см. run()).
+    с непроверенным CryptoBot-инвойсом — оплату (авто-подтверждение) и истечение
+    срока (авто-отмена). Крутится всё время работы бота (см. run()).
     """
     if not CRYPTOBOT_API_TOKEN:
         return  # интеграция не настроена — задачу можно не запускать
@@ -5094,21 +5296,33 @@ async def _cryptobot_poll_loop() -> None:
         try:
             async with pool.acquire() as conn:
                 pending = await conn.fetch("""
-                    SELECT id, crypto_invoice_id FROM orders
+                    SELECT id, crypto_invoice_id, crypto_expires_at FROM orders
                     WHERE status='pending' AND crypto_invoice_id IS NOT NULL AND crypto_paid=false
                 """)
             if not pending:
                 continue
 
+            now = datetime.now()
             invoice_ids = [r["crypto_invoice_id"] for r in pending]
             order_by_invoice = {r["crypto_invoice_id"]: r["id"] for r in pending}
 
             statuses = await cryptobot_get_invoices_status(invoice_ids)
+
+            paid_order_ids = set()
             for invoice_id, status in statuses.items():
                 if status == "paid":
                     order_id = order_by_invoice.get(invoice_id)
                     if order_id:
-                        await _cryptobot_notify_paid(order_id)
+                        paid_order_ids.add(order_id)
+                        await _cryptobot_auto_confirm(order_id)
+
+            # Отдельно проверяем истёкшие — те, что не были только что оплачены
+            # и у которых прошёл crypto_expires_at
+            for r in pending:
+                if r["id"] in paid_order_ids:
+                    continue
+                if r["crypto_expires_at"] and r["crypto_expires_at"] < now:
+                    await _cryptobot_auto_cancel(r["id"])
         except Exception:
             logger.exception("_cryptobot_poll_loop: ошибка итерации")
 
@@ -5172,12 +5386,17 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
                                  text_admin: str, payment_line: str,
                                  city_key: str | None = None,
                                  items_str: str = "",
-                                 discount: float = 0.0) -> None:
+                                 discount: float = 0.0,
+                                 crypto_pending: bool = False) -> None:
     """
     Отправляет заказ городским админам (с кнопками) и высшим (без кнопок, в стиле confirm/cancel).
     city_key: ключ из CITIES или None (→ fallback на buerhausen).
     items_str: строка вида "pid:qty,pid:qty" — для красивого текста высшим.
     discount: скидка в € — показывается высшим если > 0.
+    crypto_pending: True для CryptoBot-заказов, ожидающих оплату — у городских
+    админов кнопка "Подтвердить" ЕЩЁ НЕ показывается (подтверждение произойдёт
+    автоматически по факту оплаты), доступна только "Отменить" на случай
+    ошибочного заказа.
     """
     resolved_city = get_order_city(city_key)
     city_name = CITIES[resolved_city]["name"]
@@ -5196,10 +5415,13 @@ async def _send_order_to_admins(order_id: int, uid: int, username: str,
         f"{payment_line}"
     )
     kb = InlineKeyboardMarkup()
-    kb.add(
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
-        InlineKeyboardButton("❌ Отменить",    callback_data=f"admin_cancel_{order_id}")
-    )
+    if crypto_pending:
+        kb.add(InlineKeyboardButton("❌ Отменить", callback_data=f"admin_cancel_{order_id}"))
+    else:
+        kb.add(
+            InlineKeyboardButton("✅ Подтвердить", callback_data=f"admin_confirm_{order_id}"),
+            InlineKeyboardButton("❌ Отменить",    callback_data=f"admin_cancel_{order_id}")
+        )
 
     # Рассылаем только городским админам нужного города
     city_admin_ids = get_city_admins(resolved_city)
@@ -5351,11 +5573,12 @@ async def paid_usdt(call):
 @dp.callback_query_handler(lambda c: c.data == "pay_cryptobot")
 async def pay_cryptobot(call):
     """
-    Оплата через CryptoBot (Crypto Pay API). В отличие от ручного USDT-перевода,
-    тут не нужна кнопка "Я оплатил" — заказ создаётся сразу, а фоновый поллер
-    (_cryptobot_poll_loop) сам заметит оплату и пришлёт админам пометку об этом.
-    Городской админ всё равно жмёт Подтвердить/Отменить сам — это физическая
-    выдача товара, автоматизировать её нельзя и не нужно.
+    Оплата через CryptoBot (Crypto Pay API). Заказ создаётся сразу со статусом
+    pending, но кнопка "Подтвердить" у городских админов НЕ показывается —
+    подтверждение происходит АВТОМАТИЧЕСКИ, как только фоновый поллер
+    (_cryptobot_poll_loop) увидит оплату. До этого момента у админов есть
+    только кнопка "Отменить" (на случай ошибочного заказа). Заказ также
+    автоматически отменяется, если время на оплату истекло.
     """
     if not await check_not_banned(call):
         return
@@ -5398,28 +5621,114 @@ async def pay_cryptobot(call):
         await call.answer(await t(uid, "cryptobot_error"), show_alert=True)
         return
 
+    expires_at = datetime.now() + timedelta(seconds=CRYPTOBOT_INVOICE_TTL)
+
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE orders SET crypto_invoice_id=$1 WHERE id=$2",
-            invoice["invoice_id"], order_id
+            "UPDATE orders SET crypto_invoice_id=$1, crypto_expires_at=$2 WHERE id=$3",
+            invoice["invoice_id"], expires_at, order_id
         )
 
     payment_line = (
-        f"Оплата: CryptoBot (автопроверка)\n"
+        f"Оплата: CryptoBot (автоподтверждение)\n"
         f"Сумма EUR: {fmt_amount(eur_total)}€\n"
         f"К оплате: {fmt_amount(usdt_amount)} USDT\n"
         f"ИТОГО: {fmt_amount(eur_total)}€"
     )
-    await _send_order_to_admins(order_id, uid, username, text_admin, payment_line, city_key=resolved_city, items_str=items_str, discount=discount)
+    await _send_order_to_admins(
+        order_id, uid, username, text_admin, payment_line,
+        city_key=resolved_city, items_str=items_str, discount=discount,
+        crypto_pending=True,
+    )
 
     text = (await t(uid, "pay_cryptobot_screen")).format(
         eur=fmt_amount(eur_total),
         usdt=fmt_amount(usdt_amount),
+        minutes=CRYPTOBOT_INVOICE_TTL // 60,
+        deadline=expires_at.strftime("%H:%M"),
     )
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton(await t(uid, "pay_cryptobot_pay_btn"), url=invoice["pay_url"]))
+    kb.add(InlineKeyboardButton(await t(uid, "crypto_cancel_btn"), callback_data=f"crypto_cancel_{order_id}"))
     await render(call, text, kb)
+
+    # render() редактирует call.message на месте — значит message_id уже известен,
+    # ничего дополнительно ловить не нужно
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE orders SET user_message_id=$1 WHERE id=$2",
+            call.message.message_id, order_id
+        )
+
     await notify_no_username(call, uid)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("crypto_cancel_"))
+async def crypto_cancel_by_user(call):
+    """Пользователь сам отменяет свой ещё не оплаченный CryptoBot-заказ."""
+    uid = call.from_user.id
+    order_id = int(call.data.replace("crypto_cancel_", ""))
+
+    async with pool.acquire() as conn:
+        order = await conn.fetchrow("""
+            SELECT status, user_id, items, city_key, admin_message_ids, super_message_ids,
+                   crypto_invoice_id, crypto_paid
+            FROM orders WHERE id=$1
+        """, order_id)
+
+    if not order or order["user_id"] != uid:
+        await call.answer("❌ Заказ не найден", show_alert=True)
+        return
+    if order["status"] != "pending" or order["crypto_paid"]:
+        await call.answer("Заказ уже обработан", show_alert=True)
+        return
+
+    async with pool.acquire() as conn:
+        cancelled_id = await conn.fetchval(
+            "UPDATE orders SET status='cancelled' WHERE id=$1 AND status='pending' RETURNING id",
+            order_id
+        )
+        if not cancelled_id:
+            await call.answer("Заказ уже обработан", show_alert=True)
+            return
+        await release_reserved_stock(conn, order_id)
+
+    if order["crypto_invoice_id"]:
+        await cryptobot_delete_invoice(order["crypto_invoice_id"])
+
+    await call.answer()
+    await render(call, (await t(uid, "crypto_cancelled_by_user")).format(id=order_id))
+
+    # Городским админам — редактируем исходную карточку на "отменено пользователем".
+    # base_text реконструируем из данных заказа (у нас нет call.message городского
+    # админа — только call.message самого пользователя).
+    buyer_label, items_readable = await _order_summary_parts(order)
+    order_city_name = CITIES.get(order["city_key"] or "", {}).get("name", "—")
+    base_text = (
+        f"🏪 Самовывоз | 🏙 {order_city_name}\n"
+        f"{items_readable}\n"
+        f"ID: {order_id}\n"
+        f"User: {buyer_label}"
+    )
+    await _sync_admin_messages(
+        msg_ids_raw=order["admin_message_ids"] or "",
+        actor_id=0,  # нет актора-админа — все получают одинаковый текст
+        base_text=base_text,
+        status_self="\n\n❌ ОТМЕНЕНО ПОЛЬЗОВАТЕЛЕМ",
+        status_others="\n\n❌ ОТМЕНЕНО ПОЛЬЗОВАТЕЛЕМ",
+    )
+
+    # Высшим — удаляем старое "оформлен" и шлём новое "отменено"
+    await _delete_super_order_messages(order["super_message_ids"] or "")
+    buyer_label_super = f"@{username}" if (username := call.from_user.username) else f"id{uid}"
+    super_notify = f"❌ Заказ #{order_id} отменён пользователем ({buyer_label_super})."
+    for super_id in SUPER_ADMINS:
+        try:
+            await bot.send_message(super_id, super_notify)
+        except Exception:
+            pass
+
+
 
 
 @dp.callback_query_handler(lambda c: c.data == "pay_card_delivery")
@@ -5559,36 +5868,31 @@ async def paid_card_uah(call):
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("admin_confirm_"))
-async def admin_confirm(call):
-    if not is_admin(call.from_user.id):
-        await call.answer("❌ Нет доступа", show_alert=True)
-        return
-    order_id = int(call.data.split("_")[2])
-    admin_username = call.from_user.username or "admin"
+async def _finalize_order_confirmed(order_id: int) -> dict | None:
+    """
+    Ядро подтверждения заказа: финализирует резерв склада, начисляет ранг/стрик/
+    рулетку/реферальные и партнёрские награды, списывает одноразовые скидки,
+    уведомляет пользователя (новый ранг, рулетка готова, скидки сохранены/частично
+    списаны). НЕ трогает admin_message_ids/super_message_ids и НЕ шлёт сообщения
+    админам — это делает вызывающий код (кнопка "Подтвердить" или авто-подтверждение
+    поллером CryptoBot), у них разный стиль уведомления админов.
 
+    Возвращает dict с данными заказа (для дальнейшей отправки сообщений админам)
+    или None, если заказ уже был обработан кем-то другим (гонка).
+    """
     async with pool.acquire() as conn:
         order = await conn.fetchrow("""
-            SELECT user_id, items, status, admin_message_ids, super_message_ids, discount, total, city_key, created_at
-            FROM orders 
-            WHERE id=$1
+            SELECT user_id, items, status, admin_message_ids, super_message_ids,
+                   discount, total, city_key, created_at
+            FROM orders WHERE id=$1
         """, order_id)
 
     if not order or order["status"] != "pending":
-        await call.answer("Заказ уже обработан", show_alert=True)
-        return
-
-    # Проверка прав: городской админ может подтверждать только свой город
-    actor_id = call.from_user.id
-    actor_city = get_city_for_admin(actor_id)
-    order_city = order["city_key"] or "buerhausen"
-    if actor_city is not None and actor_city != order_city:
-        await call.answer("❌ Этот заказ относится к другому городу", show_alert=True)
-        return
+        return None
 
     user_id = order["user_id"]
     items = order["items"]
-    msg_ids_raw = order["admin_message_ids"] or ""
-    super_msg_ids_raw = order["super_message_ids"] or ""
+    order_city = order["city_key"] or "buerhausen"
     order_discount = order["discount"] or 0
     order_total = order["total"] or 0
     order_city_name = CITIES.get(order_city, {}).get("name", order_city)
@@ -5600,8 +5904,7 @@ async def admin_confirm(call):
             order_id
         )
         if not confirmed_id:
-            await call.answer("Заказ уже обработан другим админом", show_alert=True)
-            return
+            return None
 
         # Финализируем резерв — stock уже уменьшен при оформлении, просто чистим резерв
         await finalize_reserved_stock(conn, order_id)
@@ -5763,6 +6066,64 @@ async def admin_confirm(call):
             except Exception as _e:
                 logger.warning("ref_discount_partial notify failed for %s: %s", user_id, _e)
 
+    return {
+        "user_id": user_id,
+        "items": items,
+        "order_city": order_city,
+        "order_city_name": order_city_name,
+        "order_discount": order_discount,
+        "order_total": order_total,
+        "admin_message_ids": order["admin_message_ids"] or "",
+        "super_message_ids": order["super_message_ids"] or "",
+        "created_at": order["created_at"],
+    }
+
+
+async def admin_confirm(call):
+    if not is_admin(call.from_user.id):
+        await call.answer("❌ Нет доступа", show_alert=True)
+        return
+    order_id = int(call.data.split("_")[2])
+    admin_username = call.from_user.username or "admin"
+
+    async with pool.acquire() as conn:
+        order_check = await conn.fetchrow(
+            "SELECT status, city_key, crypto_invoice_id, crypto_paid FROM orders WHERE id=$1", order_id
+        )
+
+    if not order_check or order_check["status"] != "pending":
+        await call.answer("Заказ уже обработан", show_alert=True)
+        return
+
+    # CryptoBot-заказы подтверждаются ТОЛЬКО автоматически по факту оплаты —
+    # у этой кнопки для таких заказов вообще нет callback'а "Подтвердить"
+    # (см. _send_order_to_admins с crypto_pending=True), но подстрахуемся и тут.
+    if order_check["crypto_invoice_id"] and not order_check["crypto_paid"]:
+        await call.answer("⏳ Ждём оплату через CryptoBot — подтверждение произойдёт автоматически", show_alert=True)
+        return
+
+    # Проверка прав: городской админ может подтверждать только свой город
+    actor_id = call.from_user.id
+    actor_city = get_city_for_admin(actor_id)
+    order_city_check = order_check["city_key"] or "buerhausen"
+    if actor_city is not None and actor_city != order_city_check:
+        await call.answer("❌ Этот заказ относится к другому городу", show_alert=True)
+        return
+
+    result = await _finalize_order_confirmed(order_id)
+    if result is None:
+        await call.answer("Заказ уже обработан другим админом", show_alert=True)
+        return
+
+    user_id = result["user_id"]
+    items = result["items"]
+    order_city = result["order_city"]
+    order_city_name = result["order_city_name"]
+    order_discount = result["order_discount"]
+    order_total = result["order_total"]
+    msg_ids_raw = result["admin_message_ids"]
+    super_msg_ids_raw = result["super_message_ids"]
+
     await call.answer("Подтверждено")
 
     await _sync_admin_messages(
@@ -5801,7 +6162,7 @@ async def admin_confirm(call):
             buyer_uname = None
 
         buyer_label = f"@{buyer_uname}" if buyer_uname else f"id{user_id}"
-        created_str = order["created_at"].strftime("%d.%m.%Y %H:%M") if order["created_at"] else "—"
+        created_str = result["created_at"].strftime("%d.%m.%Y %H:%M") if result["created_at"] else "—"
         confirmed_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
         super_notify = (
@@ -5830,7 +6191,8 @@ async def admin_cancel(call):
 
     async with pool.acquire() as conn:
         order = await conn.fetchrow("""
-            SELECT status, admin_message_ids, super_message_ids, user_id, items, total, discount, city_key, created_at
+            SELECT status, admin_message_ids, super_message_ids, user_id, items, total,
+                   discount, city_key, created_at, crypto_invoice_id, crypto_paid, user_message_id
             FROM orders
             WHERE id=$1
         """, order_id)
@@ -5848,6 +6210,24 @@ async def admin_cancel(call):
         )
         # Возвращаем зарезервированный stock
         await release_reserved_stock(conn, order_id)
+
+    # CryptoBot-заказ, ещё не оплаченный — гасим инвойс (пользователь больше не
+    # сможет его оплатить) и заменяем его "экран оплаты" сообщением об отмене
+    if order["crypto_invoice_id"] and not order["crypto_paid"]:
+        await cryptobot_delete_invoice(order["crypto_invoice_id"])
+        buyer_uid = order["user_id"]
+        if order["user_message_id"]:
+            try:
+                await bot.delete_message(buyer_uid, order["user_message_id"])
+            except Exception:
+                pass
+        try:
+            await bot.send_message(
+                buyer_uid,
+                (await t(buyer_uid, "crypto_cancelled_by_admin")).format(id=order_id)
+            )
+        except Exception:
+            pass
 
     await call.answer("Отменено")
 
